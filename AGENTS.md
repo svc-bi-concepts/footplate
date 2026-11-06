@@ -71,7 +71,10 @@ The window, its state and the yard:
     the terminal (monospace, dark, the styling as printed) from the
     `SessionScreen` answer, which `src/ansi.rs` parses. Each answer, the open
     and every refresh, stands the lines at the pane's bottom, where the
-    agent's input line is (`screen_scroll`).
+    agent's input line is (`screen_scroll`); the open stands them at the left
+    edge too. A pane wider than the card scrolls sideways: the lines are a
+    `flex_none` item of a flex scroll, so gpui measures their width, which
+    the card's estimate (`CHAR_ADVANCE`) is not good enough for.
   - `src/window/state.rs`: what the window keeps beside the model: where a
     yard stood when it was left, what waits in the yards it follows, and
     what the switch and the settings are asking or doing.

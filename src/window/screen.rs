@@ -199,6 +199,11 @@ impl Footplate {
             back,
             request: 0,
         });
+        // A pane is read from its left edge, where its lines begin, and
+        // from its bottom, which the answer stands it at: the handle
+        // outlives the card, and how far the last one was read sideways
+        // is not for this one. A refresh leaves the reader where they are.
+        self.screen_scroll.set_offset(gpui::Point::default());
         window.focus(&self.focus);
         self.read_screen(cx);
         cx.notify();
@@ -352,7 +357,10 @@ impl Footplate {
                     .into_any_element()
             }
             Shown::Here(screen) => {
-                let mut lines = div().flex().flex_col();
+                // The lines do not shrink, as the cells in their rows do
+                // not: they stand as wide as their longest row, whatever
+                // the card is (see the scroll below).
+                let mut lines = div().flex().flex_col().flex_none();
                 for line in &screen.lines {
                     let mut row = div().flex().flex_row();
                     if line.is_empty() {
@@ -378,11 +386,26 @@ impl Footplate {
                     }
                     lines = lines.child(row);
                 }
+                // gpui takes how far a scroll goes from the bounds of its
+                // direct children. A block child would be as wide as the
+                // card, and the cells that run out of it would not count:
+                // the height would scroll, the width never. A flex item
+                // that does not shrink is as wide as its content, which the
+                // layout measures as the text is drawn, so a wide pane
+                // scrolls to its last character and not past it, and a
+                // narrow one has nowhere to go. The card's width is no
+                // measure to scroll by: it is an estimate, 0.6 em a char
+                // at the size the text has before the root sets its own,
+                // and a scroll by it would end in blank room or short of
+                // the line. Items at the start keep the lines their own
+                // height, for the scroll down.
                 div()
                     .id("screen scroll")
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
+                    .flex()
+                    .items_start()
                     .overflow_scroll()
                     .track_scroll(&self.screen_scroll)
                     .child(lines)

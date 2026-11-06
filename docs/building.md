@@ -405,8 +405,10 @@ with a document it did not take under the photo), `screen`
 (the yardmaster's screen open over the window, as its Screen
 control opens it), `screen-hosted` (that card on a hosted
 yard, saying the screen is read on the yard's machine, with no
-Screen offered) and `screen-refused` (that card on a yard that
-refuses the read in many words, which wrap inside it).
+Screen offered), `screen-refused` (that card on a yard that
+refuses the read in many words, which wrap inside it) and `screen-wide`
+(that card on a pane of 200 columns, wider than the window, scrolled to
+the end of its lines).
 With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the

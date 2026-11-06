@@ -97,8 +97,9 @@ use crate::yard::Env;
 /// did not take under the photo, the yardmaster's screen open over
 /// the window, as its Screen control opens it, that card on a
 /// hosted yard, saying the screen is read on the yard's machine, with
-/// no Screen offered, and that card on a yard that refuses the read in
-/// many words, which wrap inside it.
+/// no Screen offered, that card on a yard that refuses the read in
+/// many words, which wrap inside it, and that card on a pane wider than the
+/// window, scrolled to the end of its lines.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -206,6 +207,7 @@ pub const STATES: &[&str] = &[
     "screen",
     "screen-hosted",
     "screen-refused",
+    "screen-wide",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -220,6 +222,12 @@ pub(crate) const IMAGE_OPEN: (&str, u64) = (IMAGE_HASH, IMAGE.len() as u64);
 /// The screen the `screen` state opens with: a real Claude Code pane,
 /// captured with the `SessionScreen` form, served as the call's answer.
 const SCREEN_SHOT: &str = include_str!("fixtures/screen-claude.ansi");
+
+/// The screen the `screen-wide` state opens with: that pane's words laid
+/// out as a terminal 200 columns wide draws them, wrapped at its width, its
+/// rules and the nudge's band drawn to its edge. The window the shots open
+/// is narrower than that, so the card scrolls sideways.
+const SCREEN_WIDE_SHOT: &str = include_str!("fixtures/screen-wide.ansi");
 
 /// The overlay the `screen` state opens with: the session it reads, one
 /// of the shot yard's crew.
@@ -1168,8 +1176,10 @@ fn populate(yard: &Yard, state: &str) {
         // screen's, whose session's screen opens over it, the
         // hosted screen's, whose card opens over it with no call, the
         // refused screen's, whose card opens over it with the
-        // yard's long refusal in red, and the voice shots', the first
-        // of which taps the Voice button once the yard is read.
+        // yard's long refusal in red, the wide screen's, whose card
+        // opens over it on a pane wider than the window, and the voice
+        // shots', the first of which taps the Voice button once the yard
+        // is read.
         "yardmaster"
         | "far"
         | "settings"
@@ -1207,7 +1217,8 @@ fn populate(yard: &Yard, state: &str) {
         | "notice"
         | "screen"
         | "screen-hosted"
-        | "screen-refused" => {
+        | "screen-refused"
+        | "screen-wide" => {
             // The conversation reads over two days, with a mail in each
             // sender's group: the yardmaster shot shows the column, the
             // grouping and the separators.
@@ -1256,6 +1267,13 @@ fn populate(yard: &Yard, state: &str) {
                 yard.answer(
                     "SessionScreen",
                     &json!({"result": {"screen": SCREEN_SHOT}}).to_string(),
+                );
+            }
+            // The wide pane the screen-wide shot opens with.
+            if state == "screen-wide" {
+                yard.answer(
+                    "SessionScreen",
+                    &json!({"result": {"screen": SCREEN_WIDE_SHOT}}).to_string(),
                 );
             }
             // The yard's refusal of a screen asked in plain HTTP, which
@@ -3484,6 +3502,15 @@ mod tests {
                     .unwrap();
                     assert_eq!(hosted.me, "jo", "{state}");
                     assert!(hosted.screen_on_the_yard, "{state}");
+                }
+                "screen-wide" => {
+                    // The pane the overlay opens with is 200 columns wide,
+                    // more than the window the shots open holds (960
+                    // pixels), so its card scrolls sideways.
+                    let screen = yard.client().session_screen(SCREEN_OPEN).unwrap();
+                    let parsed = crate::ansi::parse(&screen.screen);
+                    assert_eq!(parsed.lines.len(), 33, "{state}");
+                    assert_eq!(parsed.width, 200, "{state}");
                 }
                 "screen-refused" => {
                     // The yard is asked, and refuses in its own many words:

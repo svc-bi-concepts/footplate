@@ -1290,12 +1290,16 @@ impl Footplate {
                 // the read sees it: posed earlier, the hosted card
                 // would ask the yard. The screen-refused shot opens
                 // it too, and its yard refuses the read in many
-                // words, which the card shows in red. A debug
+                // words, which the card shows in red. So does the
+                // screen-wide shot, whose pane is wider than the window,
+                // and which stands it scrolled to the end of its lines,
+                // as a swipe to the right would: past the end, where the
+                // layout stops, as the page shot above. A debug
                 // build's alone, as above, and a unix one's.
                 #[cfg(all(debug_assertions, unix))]
                 if matches!(
                     std::env::var("FOOTPLATE_SHOT").as_deref(),
-                    Ok("screen") | Ok("screen-hosted") | Ok("screen-refused")
+                    Ok("screen") | Ok("screen-hosted") | Ok("screen-refused") | Ok("screen-wide")
                 ) {
                     self.screen_open = Some(super::screen::ScreenOpen {
                         session: crate::shot::SCREEN_OPEN.to_string(),
@@ -1303,6 +1307,10 @@ impl Footplate {
                         back: None,
                         request: 0,
                     });
+                    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("screen-wide") {
+                        self.screen_scroll
+                            .set_offset(gpui::point(px(-1_000_000.), px(0.)));
+                    }
                     self.read_screen(cx);
                 }
                 // The yard answers: the away screen's details are shut,

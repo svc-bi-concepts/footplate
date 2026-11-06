@@ -7605,8 +7605,9 @@ yardr.dev
         // screen shorter than the card has nowhere further to go, so it
         // stands as ever, at its top.
         let origin = gpui::point(px(0.), px(0.));
+        let none = gpui::size(px(0.), px(0.));
         let (at, max) = screen_stand(&view, cx);
-        assert_eq!((at, max.height), (origin, px(0.)));
+        assert_eq!((at, max), (origin, none));
         // A refresh that brings a pane taller than the card stands it at its
         // bottom.
         let pane = (1..=120)
@@ -7652,23 +7653,99 @@ yardr.dev
         cx.run_until_parked();
         assert_eq!(overlay_screen(&view, cx), None);
         assert!(line_focused(&view, cx));
-        // A click outside shuts it too. This opens on the tall pane again,
-        // at its bottom though the last card was left scrolled up, and a
-        // short screen after it stands at its top.
+        // This opens on the tall pane again, at its bottom though the last
+        // card was left scrolled up. The pane is no wider than its card, so
+        // its lines have nowhere to go sideways.
         click_on(cx, "talk screen assembly");
         wait(cx, "assembly's tall screen", |cx| {
             screen_of(&view, cx) == "120 lines"
         });
         let (at, max) = screen_stand(&view, cx);
         assert!(max.height > px(0.), "the pane does not overflow its card");
+        assert_eq!((at, max.width), (gpui::point(px(0.), -max.height), px(0.)));
+        // A pane wider than the window scrolls sideways, to the last char of
+        // its longest line and no further: the lines are as wide as that
+        // line is drawn (the test platform sets a char 0.6 of the text's
+        // size wide; the layout takes a text's width whole pixels up), and
+        // the card's body shows as much of them as it is wide. It opens at
+        // its left edge and its bottom.
+        let columns = 408;
+        let wide = (1..=120)
+            .map(|n| format!("{n:03} {}", "x".repeat(columns - 4)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        yard.answer(
+            "SessionScreen",
+            &json!({"result": {"screen": wide}}).to_string(),
+        );
+        let asked = yard.asked("SessionScreen").len();
+        click_on(cx, "screen refresh");
+        wait(cx, "the wide screen", |cx| {
+            yard.asked("SessionScreen").len() == asked + 1 && screen_of(&view, cx) == "120 lines"
+        });
+        let (at, max) = screen_stand(&view, cx);
+        let longest = cx.update(|window, _| window.rem_size()) * 0.875 * 0.6 * columns as f32;
+        let body = bounds_now(cx, "screen body assembly").size.width;
+        assert!(max.width > px(0.), "the pane does not scroll sideways");
+        assert!(
+            (max.width - (longest - body)).abs() < px(1.),
+            "{max:?} to scroll to the end of a line {longest:?} wide in a body {body:?} wide"
+        );
         assert_eq!(at, gpui::point(px(0.), -max.height));
+        // The wheel moves the lines sideways by what it brings, and the
+        // height as it stands.
+        scroll_on(cx, "screen body assembly", gpui::point(px(-300.), px(0.)));
+        let (right, _) = screen_stand(&view, cx);
+        assert_eq!(right, gpui::point(px(-300.), at.y));
+        // How far to the right the reader is, is theirs: a refresh stands the
+        // pane at its bottom, as above, and leaves them where they are.
+        scroll_on(cx, "screen body assembly", gpui::point(px(0.), px(300.)));
+        let (up, _) = screen_stand(&view, cx);
+        assert!(
+            up.y > -max.height,
+            "the wheel did not move the lines: {up:?}"
+        );
+        let asked = yard.asked("SessionScreen").len();
+        click_on(cx, "screen refresh");
+        wait(cx, "the wide screen read again", |cx| {
+            yard.asked("SessionScreen").len() == asked + 1 && screen_of(&view, cx) == "120 lines"
+        });
+        let (again, max) = screen_stand(&view, cx);
+        assert_eq!(again, gpui::point(px(-300.), -max.height));
+        // A swipe past the end stops at it.
+        scroll_on(
+            cx,
+            "screen body assembly",
+            gpui::point(px(-10_000.), px(0.)),
+        );
+        let (end, max) = screen_stand(&view, cx);
+        assert_eq!(end, gpui::point(-max.width, -max.height));
+        // Shut at its end and opened again, the screen is read from its left
+        // edge: the handle outlives the card, and the last reader's stand
+        // sideways is not this one's.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(overlay_screen(&view, cx), None);
+        click_on(cx, "talk screen assembly");
+        wait(cx, "assembly's wide screen", |cx| {
+            screen_of(&view, cx) == "120 lines"
+        });
+        let (at, max) = screen_stand(&view, cx);
+        assert!(max.width > px(0.), "the pane does not scroll sideways");
+        assert_eq!(at, gpui::point(px(0.), -max.height));
+        // A short screen after it, read from where a reader had scrolled
+        // right, stands at its left and its top: it has nowhere to go.
+        scroll_on(cx, "screen body assembly", gpui::point(px(-300.), px(0.)));
+        let (right, _) = screen_stand(&view, cx);
+        assert_eq!(right.x, px(-300.));
         yard.answer("SessionScreen", &two_lines);
         click_on(cx, "screen refresh");
         wait(cx, "assembly's screen", |cx| {
             screen_of(&view, cx) == "2 lines"
         });
         let (at, max) = screen_stand(&view, cx);
-        assert_eq!((at, max.height), (origin, px(0.)));
+        assert_eq!((at, max), (origin, none));
+        // A click outside shuts it too.
         let over = bounds_of(cx, "screen overlay");
         let outside = gpui::point(over.origin.x + px(4.), over.origin.y + px(4.));
         cx.simulate_click(outside, gpui::Modifiers::default());

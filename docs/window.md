@@ -97,7 +97,10 @@ details). Either opens what that session's pane shows over the window
 (`SessionScreen`), as the terminal draws it, with Refresh, and `esc` to
 leave it. A pane taller than the card opens at its bottom, where the agent's
 input line and its latest output are, and Refresh reads it again and returns
-there. A screen can show what an agent printed, a secret among it, so the
+there. A pane wider than the card (the card is the window's width at most)
+opens at its left edge and scrolls sideways, with the wheel or a swipe, to
+the end of its longest line; Refresh leaves you where you are sideways. A
+screen can show what an agent printed, a secret among it, so the
 yard reads it to no request that comes down the link from its edge: a hosted
 yard is not asked and offers no Screen, since the screen is read on the
 yard's machine. A yard reached any other way that refuses the read as such
