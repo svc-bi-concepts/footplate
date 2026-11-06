@@ -1,5 +1,8 @@
 # Talk with the yard by voice in footplate
 
+The single-provider choice below is historical. For the current provider
+choices, key handling and Agent setup, see [Voice settings](../window.md#settings).
+
 Design footplate-vqze, proposed 2026-10-31 and corrected 2026-11-01 under footplate-nqjf to what OpenAI's Live reference and four live runs of the spike harness settled (section 2 names the runs). A proposal as it was decided on, not a description of what the code does today; the decision is on the bead.
 
 Design for bead footplate-vqze (flow `design.design`, stage `draft`). A yard is one installation of yardr: its beads, its crew and its depots. A crew member is an agent of the yard that a person talks with by mail; an ask is one question as data on a bead, which the person answers on its card, and a weighty ask passes the system's unlock, or the typing back of its number, before it is approved. footplate is the yard's native desktop window (Rust, gpui): a person reads conversations with the crew, users of the yard and people of linked yards, and answers asks there. A voice service is a provider outside the yard that hears speech and speaks back; in this design it is OpenAI's API. GPT-Live is OpenAI's full-duplex voice model (`gpt-live-1`): it listens and speaks at the same time and hands work that needs reasoning or tools to a backend, which OpenAI calls delegation. Client delegation is the form where the application itself is that backend. The Realtime API is OpenAI's other voice offer, where one model hears, reasons, calls tools and speaks inside a single session. See `docs/glossary.md` in the yardr repository for all of yardr's words.

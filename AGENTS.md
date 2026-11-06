@@ -109,8 +109,10 @@ The window, its state and the yard:
   away), the instructions and the state words, the voices GPT-Live offers
   (`VOICES`, which the Voice settings' picker lists and a session is started
   in, from OpenAI's reference), and the events of OpenAI's GPT-Live, which
-  this is the one module to speak (no provider trait, and no setting to
-  choose another provider). Below the rules, the live socket itself: a
+  this is the one module to speak. `Provider` selects GPT-Live or the optional
+  ElevenLabs Agent at explicit start; Agent configuration is saved separately,
+  but start is refused until its backend is ready. No provider wire events
+  enter the window's mail path. Below the rules, the live socket itself: a
   hand-written WebSocket over `src/api.rs`'s TLS (its upgrade's accept key is
   the one SHA-1 in the tree, `sha1_smol`), and the session's one thread in the
   `FollowControl` manner, which owns the microphone's frames in and the

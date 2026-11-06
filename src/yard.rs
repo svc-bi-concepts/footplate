@@ -366,7 +366,7 @@ pub(crate) struct KeptKind {
     /// read without one; a voice key has no such legacy form.
     marker_required: bool,
     /// Whether the file may name the yard or edge the credential is for.
-    /// A voice key is for OpenAI and has no address.
+    /// A voice key is for its provider and has no address.
     has_address: bool,
     /// `token`, `session` or `voice key`, as a refusal names the file and
     /// what it holds.
@@ -375,7 +375,7 @@ pub(crate) struct KeptKind {
     /// mode is read, which Windows has none to.
     #[cfg_attr(not(unix), allow(dead_code))]
     open: &'static str,
-    /// What gave the token: `the yard`, `signing in` or `OpenAI`.
+    /// What gave the token: the yard, signing in or the voice provider.
     giver: &'static str,
 }
 
@@ -406,6 +406,13 @@ pub(crate) const VOICE_KIND: KeptKind = KeptKind {
     giver: "OpenAI",
 };
 
+const ELEVENLABS_KIND: KeptKind = KeptKind {
+    marker: "!footplate-elevenlabs-v1",
+    open: "whoever reads it calls ElevenLabs as you",
+    giver: "ElevenLabs",
+    ..VOICE_KIND
+};
+
 impl KeptKind {
     /// The token `file` holds, and the address it is for where the file
     /// says.
@@ -421,7 +428,9 @@ impl KeptKind {
                 format!("Not signed in: {at} is not there. Sign in to this hosted yard again.")
             }
             "voice key" => format!(
-                "There is no voice key: {at} is not there. Type your OpenAI key in the settings' Voice section, or set FOOTPLATE_OPENAI_KEY."
+                "There is no voice key: {at} is not there. Type your {} key in the settings' Voice section, or set FOOTPLATE_{}_KEY.",
+                self.giver,
+                self.giver.to_ascii_uppercase()
             ),
             _ => format!(
                 "This device has no token: {at} is not there. Pair it in the settings, with a code the yard's operator opens: yardr user device pair <user> <device>"
@@ -481,7 +490,7 @@ fn kept_as(file: &Path, kind: KeptKind) -> Result<KeptToken, String> {
         .map_err(|err| format!("The {noun} file {at} cannot be read: {err}"))?;
     let ends_newline = text.ends_with('\n');
     // A voice key stands with the marker under it and no address: it is
-    // for OpenAI, not for one yard.
+    // for its provider, not for one yard.
     let none = || match noun {
         "voice key" => format!(
             "The voice key file {at} holds no voice key: one is a line, as OpenAI gave it, with footplate's marker under it."
@@ -609,32 +618,64 @@ pub fn session_for(file: &Path, address: &Address) -> Result<String, String> {
 // Read by the voice session (voice::start_session), at its start alone: while
 // voice is off the session is never made and this is never called.
 pub fn voice_key(settings: Option<&Path>) -> Result<String, String> {
-    voice_key_as(std::env::var("FOOTPLATE_OPENAI_KEY").ok(), settings)
+    provider_key(crate::voice::Provider::OpenAi, settings)
 }
 
-/// The voice key the environment's value `env` holds, else the file's:
-/// what a test holds the environment to without setting it.
+/// Reads only the selected service's environment and file, at explicit start.
+pub fn provider_key(
+    provider: crate::voice::Provider,
+    settings: Option<&Path>,
+) -> Result<String, String> {
+    provider_key_with(provider, settings, |name| std::env::var(name).ok())
+}
+
+fn provider_key_with(
+    provider: crate::voice::Provider,
+    settings: Option<&Path>,
+    env: impl FnOnce(&str) -> Option<String>,
+) -> Result<String, String> {
+    provider_key_as(provider, env(provider.key_env()), settings)
+}
+
+#[cfg(test)]
 pub(crate) fn voice_key_as(env: Option<String>, settings: Option<&Path>) -> Result<String, String> {
+    provider_key_as(crate::voice::Provider::OpenAi, env, settings)
+}
+
+fn provider_kind(provider: crate::voice::Provider) -> KeptKind {
+    match provider {
+        crate::voice::Provider::OpenAi => VOICE_KIND,
+        crate::voice::Provider::ElevenLabs => ELEVENLABS_KIND,
+    }
+}
+
+/// The selected provider's supplied environment value, else its own file.
+pub(crate) fn provider_key_as(
+    provider: crate::voice::Provider,
+    env: Option<String>,
+    settings: Option<&Path>,
+) -> Result<String, String> {
     if let Some(key) = env
         .map(|key| key.trim().to_string())
         .filter(|key| !key.is_empty())
     {
         if !api::is_token(&key) {
-            return Err(
-                "FOOTPLATE_OPENAI_KEY is no voice key: one is a line, as OpenAI gave it."
-                    .to_string(),
-            );
+            return Err(format!(
+                "{} is no voice key: one is a line, as {} gave it.",
+                provider.key_env(),
+                provider_kind(provider).giver
+            ));
         }
         return Ok(key);
     }
     let Some(settings) = settings else {
-        return Err(
-            "There is no home directory to keep the voice key in. Set FOOTPLATE_OPENAI_KEY."
-                .to_string(),
-        );
+        return Err(format!(
+            "There is no home directory to keep the voice key in. Set {}.",
+            provider.key_env()
+        ));
     };
-    VOICE_KIND
-        .read(&settings.with_file_name(VOICE_KEY_FILE))
+    provider_kind(provider)
+        .read(&settings.with_file_name(provider.key_file()))
         .map(|kept| kept.token)
 }
 
@@ -822,12 +863,24 @@ pub fn keep_session(file: &Path, token: &str, address: &Address) -> io::Result<(
 /// written beside itself and renamed. What is no key is refused with
 /// why, and nothing written.
 pub fn keep_voice_key(file: &Path, key: &str) -> Result<(), String> {
+    keep_provider_key(crate::voice::Provider::OpenAi, file, key)
+}
+
+/// The same owner-only, atomic keeper, with a distinct provider marker.
+pub fn keep_provider_key(
+    provider: crate::voice::Provider,
+    file: &Path,
+    key: &str,
+) -> Result<(), String> {
     let key = key.trim();
     if !api::is_token(key) {
-        return Err("That is no voice key: one is a line, as OpenAI gave it.".to_string());
+        return Err(format!(
+            "That is no voice key: one is a line, as {} gave it.",
+            provider_kind(provider).giver
+        ));
     }
     token_place(file)
-        .and_then(|place| place.keep_as(key, None, VOICE_KIND))
+        .and_then(|place| place.keep_as(key, None, provider_kind(provider)))
         .map_err(|err| {
             format!(
                 "The voice key file {} cannot be written: {err}",
@@ -865,6 +918,103 @@ pub fn typed(address: &str, code: &str) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_credentials_have_distinct_files_environments_and_markers() {
+        use crate::voice::Provider::{ElevenLabs, OpenAi};
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        assert_eq!(OpenAi.key_env(), "FOOTPLATE_OPENAI_KEY");
+        assert_eq!(ElevenLabs.key_env(), "FOOTPLATE_ELEVENLABS_KEY");
+        assert_eq!(OpenAi.key_file(), "voice.key");
+        assert_eq!(ElevenLabs.key_file(), "elevenlabs.key");
+        keep_provider_key(
+            OpenAi,
+            &settings.with_file_name(OpenAi.key_file()),
+            "openai-test",
+        )
+        .unwrap();
+        keep_provider_key(
+            ElevenLabs,
+            &settings.with_file_name(ElevenLabs.key_file()),
+            "eleven-test",
+        )
+        .unwrap();
+        assert_eq!(
+            provider_key_as(OpenAi, None, Some(&settings)).unwrap(),
+            "openai-test"
+        );
+        assert_eq!(
+            provider_key_as(ElevenLabs, None, Some(&settings)).unwrap(),
+            "eleven-test"
+        );
+        assert_eq!(
+            provider_key_as(ElevenLabs, Some("env-eleven".into()), Some(&settings)).unwrap(),
+            "env-eleven"
+        );
+        assert!(
+            provider_key_as(ElevenLabs, Some("invalid key".into()), Some(&settings))
+                .unwrap_err()
+                .contains("FOOTPLATE_ELEVENLABS_KEY")
+        );
+        for provider in [OpenAi, ElevenLabs] {
+            assert_eq!(
+                provider_key_with(provider, Some(&settings), |name| {
+                    assert_eq!(
+                        name,
+                        provider.key_env(),
+                        "only the selected environment is read"
+                    );
+                    Some("selected-env-key".into())
+                })
+                .unwrap(),
+                "selected-env-key"
+            );
+        }
+        fs::remove_file(settings.with_file_name(OpenAi.key_file())).unwrap();
+        assert_eq!(
+            provider_key_as(ElevenLabs, None, Some(&settings)).unwrap(),
+            "eleven-test"
+        );
+        keep_provider_key(
+            OpenAi,
+            &settings.with_file_name(OpenAi.key_file()),
+            "openai-test",
+        )
+        .unwrap();
+        // Even copying the other provider's file does not lend its credential.
+        fs::copy(
+            settings.with_file_name(OpenAi.key_file()),
+            settings.with_file_name(ElevenLabs.key_file()),
+        )
+        .unwrap();
+        assert!(provider_key_as(ElevenLabs, None, Some(&settings)).is_err());
+        assert_eq!(
+            provider_key_as(OpenAi, None, Some(&settings)).unwrap(),
+            "openai-test"
+        );
+    }
+
+    // Unix permissions are not a Windows file-mode boundary.
+    #[cfg(unix)]
+    #[test]
+    fn elevenlabs_refuses_a_key_readable_by_other_users() {
+        use crate::voice::Provider::ElevenLabs;
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let key = settings.with_file_name(ElevenLabs.key_file());
+        keep_provider_key(ElevenLabs, &key, "eleven-test").unwrap();
+        assert_eq!(
+            fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            provider_key_as(ElevenLabs, None, Some(&settings))
+                .unwrap_err()
+                .contains("ElevenLabs")
+        );
+    }
+
     use super::*;
     use crate::fake::{TOKEN, Yard};
     use crate::session;
