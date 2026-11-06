@@ -634,8 +634,8 @@ impl Footplate {
 
     /// The stream told of `event`. Where it is the other side's mail in the
     /// voiced conversation, the voice is given its text, and its text only:
-    /// the session knows whether an answer is waited for, and speaks it only
-    /// then. The person's own mail never goes.
+    /// GPT-Live speaks it only when awaited; ElevenLabs receives labelled
+    /// context without a reply relation. The person's own mail never goes.
     pub(crate) fn voice_hears(&mut self, event: &Event) {
         let (Some(talk), Some(model)) = (self.voice.as_mut(), self.model.as_ref()) else {
             return;

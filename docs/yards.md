@@ -17,14 +17,12 @@ JSON object a line. `src/api.rs` is the whole client.
 Or a yard that is not on this machine, at the address of its listener: see
 [A yard at an address](#a-yard-at-an-address). The calls are the same ones.
 
-Beside the yard it speaks to three sites that are no yard's: yardr.dev, for
+Beside the yard it speaks to four sites that are no yard's: yardr.dev, for
 yardr's installer when you ask for it ([yardr, a dependency](#yardr-a-dependency)), PostHog's EU
 capture, to which [the Feedback form](window.md#feedback) sends a message when you
-press Send, and never otherwise, and OpenAI's Live API, to which a
-[voice session](window.md#settings) you started sends the microphone's audio and what
-you say, the yard's name and the name of whom you are talking with, and what
-they answer in that conversation, for as long as the session stands, and
-never otherwise: the microphone is open only while a session stands.
+press Send, and never otherwise; and OpenAI's Live API or ElevenLabs, for the
+selected voice provider. [Voice settings](window.md#settings) describes what
+an explicitly started session sends and keeps.
 
 | It reads | For |
 |---|---|
@@ -49,9 +47,9 @@ never otherwise: the microphone is open only while a session stands.
 
 | It writes | When |
 |---|---|
-| `Mail` | Enter or the Send button, in a conversation with a crew member or a user of this yard, your own too |
+| `Mail` | Enter or the Send button, or a [voice send](window.md#settings), in a conversation with a crew member or a user of this yard, your own too |
 | `PutBlob` for each file, then `Mail` with their hashes and names | Enter or the Send button, when files are attached to the draft |
-| `MailPeer` | Enter or the Send button, in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each file, with their hashes and names |
+| `MailPeer` | Enter or the Send button, or a [voice send](window.md#settings), in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each attached file, with their hashes and names |
 | `React` | a tap on one of the bar of reactions floating over the hovered mail: the emoji, or nothing on the user's own current one, which takes it away |
 | `AnswerAsk` | Enter, or the Answer button, on a card: the option chosen — the recommendation until another is picked — with the line's words in the one answer; an ask with no options is answered with words. A mapping pick sends `weighed` after the weighty gate |
 | `AddNote` | Enter, with words and no option chosen and none recommended: a plain note, the ask stays open |

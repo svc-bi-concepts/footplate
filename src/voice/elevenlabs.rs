@@ -283,7 +283,10 @@ fn configuration(config: &Value, tools: &[Value], voice_override: bool) -> Resul
         || params["properties"].as_object().map(|p| p.len()) != Some(1)
         || params["required"] != json!(["text"])
     {
-        return Err("Configure send_to_yard(text: string) with Wait for response and no other parameters.".into());
+        return Err(
+            "Configure send_to_yard(text: string) with Wait for response and no other parameters."
+                .into(),
+        );
     }
     Ok(())
 }

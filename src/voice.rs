@@ -1,6 +1,6 @@
 //! The voice session's rules, as plain functions and one small book, tested
 //! on any system: no socket, no microphone, no window, no key. footplate's
-//! voice is OpenAI's GPT-Live in client delegation
+//! GPT-Live provider uses client delegation
 //! (docs/design/2026-10-31-footplate-vqze-voice.md), and this is the one
 //! module that speaks it: its events, its delegations and its appends stay in
 //! here. What stands outside speaks in plain terms: speech started
@@ -9,7 +9,7 @@
 //! start; ElevenAgents has its own protocol in [`elevenlabs`].
 //! GPT-Live's wire protocol stays here; its voices are [`VOICES`].
 //!
-//! The person's words reach the module as fragments of a transcript, and the
+//! With GPT-Live, the person's words arrive as fragments of a transcript, and the
 //! model's delegation carries none of them, so [`task_from`] works out what
 //! was asked, and only cuts: whole words of the person's, in the order they
 //! said them, and never one the model said. What the yard answers goes back to

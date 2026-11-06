@@ -12,11 +12,8 @@ fetches yardr and runs its commands, with no terminal. Its head starts and
 stops the open yard the same way. Beside those two it starts nothing of
 yardr's. The conversations are as `yardr chat` shows them in a terminal.
 
-Voice is optional and off by default. Settings → Voice offers OpenAI GPT-Live
-and an optional existing ElevenLabs Agent. Each provider uses its own key.
-Agent tools send ordinary yard mail and return pending; new conversation mail
-reaches the Agent as labelled context. See
-[Voice settings](docs/window.md#settings) for keys, data flow and setup.
+Optional voice is configured in [Voice settings](docs/window.md#settings),
+including provider choice, keys, data flow and Agent setup.
 
 ## Installing
 

@@ -353,7 +353,9 @@ folder. A change is drawn at once and kept for the next start:
   into its masked field and kept in `voice.key` beside the settings,
   for you alone, never in the settings file; where
   `FOOTPLATE_OPENAI_KEY` is set it is read first and the file is not
-  read. ElevenLabs instead uses `elevenlabs.key` and
+  read. A GPT-Live session sends microphone audio, what you say, the yard's
+  name, the counterpart's name and their conversation replies to OpenAI.
+  ElevenLabs instead uses `elevenlabs.key` and
   `FOOTPLATE_ELEVENLABS_KEY`; the files use distinct markers and the same
   keeper. On macOS and Linux it writes mode 0600 and refuses files readable
   by others; on Windows it relies on the profile directory's permissions.
@@ -399,18 +401,21 @@ folder. A change is drawn at once and kept for the next start:
   yardmaster-chris and starts a session there.
   While a session stands, quiet words beside the button say what is going
   on (`starting…`, `listening`, `yardmaster is working`, `speaking`), a
-  line under the head shows what you have said that no request has taken
-  yet (a pause does not clear it; a long one shows its last words), and
+  line under the head shows the latest ElevenLabs transcript, or with GPT-Live,
+  what you have said that no request has taken yet (a pause does not clear it;
+  a long one shows its last words), and
   the head's right counts the elapsed time (ElevenLabs), or the minutes and
   what they have cost at OpenAI's
   rate, $0.05 a minute. When the voice sends something to the yard, it goes
-  as your own mail in that conversation, as Enter would send it, once you
-  have stopped talking, with the requests and replies it has held since its
-  previous send, in the order you said them;
-  while the yard is away it is refused, once, and nothing is queued or sent
-  when the yard returns. The mail the other side answers with is spoken by the voice
-  in its own words, and the written mail stays the record. A decision that comes up in the window is
-  never answered by voice: the voice says it waits there. A session ends
+  as your own mail in that conversation, as Enter would send it. With GPT-Live,
+  it sends once you have stopped talking, with the requests and replies it has
+  held since its previous send, in the order you said them. Its awaited answers are spoken
+  in the voice's own words. ElevenLabs instead sends through its client tool;
+  see the [Agent template](#elevenlabs-agent-template) for pending results and
+  contextual mail updates. With either provider, while the yard is away a
+  send is refused, once, and nothing is queued or sent when the yard returns.
+  Written mail stays the record. A decision that comes up in the window is
+  never answered by voice; GPT-Live says it waits there. A session ends
   when you tap Stop, open another conversation or yard, switch voice off,
   hide, minimize or close the window, or when nobody has spoken and
   nothing waits for the yard for the minutes the section's `ends after`
