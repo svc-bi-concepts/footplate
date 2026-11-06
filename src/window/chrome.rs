@@ -65,7 +65,7 @@ use super::{Dismiss, JumpNewest, JumpOldest, Leave};
 pub const VOICE_PLAIN: &str = "Microphone audio from this machine streams to OpenAI during a voice session you start, with what you say, the yard's name and the name of who you are talking with, and what they answer in the open conversation. The voice speaks answers in its own words, which may differ from the mail; the written mail in the conversation is the record. No saved session is kept with store off, but what was said may appear in OpenAI's abuse-monitoring logs, kept for up to 30 days by default. Your key stays on this machine, in a file beside the settings. Nothing is sent while voice is off, or while no session stands.";
 
 /// Disclosure for the configured Agent; account settings are not inferred.
-pub const ELEVENLABS_PLAIN: &str = "A session you explicitly start sends microphone audio, transcripts, tool inputs, open-conversation context and replies to ElevenLabs; text context also reaches the Agent's LLM provider. The Agent may paraphrase: written yard mail is the record. Account retention and training settings have not been verified; check them in your workspace before use. Footplate saves no audio or transcripts. Your key stays in elevenlabs.key beside the settings and is used to authenticate with ElevenLabs. It never enters settings JSON, yard mail or telemetry. Nothing is sent and no key is read while voice is off or no session stands.";
+pub const ELEVENLABS_PLAIN: &str = "Voice is off until enabled and explicitly started. A session sends microphone audio, transcripts, tool inputs, the selected yard and crew names, open-conversation context and returned yard mail to ElevenLabs; text also reaches the Agent's LLM provider. Spoken answers may be wrong: written yard mail is the record. Agent call minutes and pass-through LLM usage are charged separately; subscription Agents entitlement and balance are unverified. The meter estimates only calls at $0.08/min before discounts, excluding burst pricing; LLM usage is extra and unknown. Context grows with the conversation. Silence longer than 10 seconds has a 95% call discount; pending work can keep an idle session connected until its finite wait ends. Above-quota use requires purchased PAYG credits or legacy usage billing; Footplate never enables either or switches provider automatically. ElevenLabs retains conversation data for two years by default, with separate transcript and audio controls that can be changed. Before commissioning, check and record retention, audio saving and training choices; recommended: audio saving off, zero-day scheduled deletion where available and training opt-out. These choices are not configured or verified here. Training opt-out concerns future submissions and is separate from deletion. Enterprise Zero Retention Mode and EU residency need eligible access and configuration; ordinary subscriptions promise neither, and EU storage alone does not ensure EU-only processing. Footplate adds no audio archive or duplicate transcript store; ordinary yard mail remains under the yard's rules. Your key stays locally in elevenlabs.key beside settings, owner-only on Unix, and authenticates with ElevenLabs. It never enters settings JSON, yard mail or telemetry. Nothing is sent, no microphone opens and no key is read while voice is off or no session stands.";
 
 /// A label of the Voice section's rows, in the column their fields stand
 /// after ([`VOICE_LABEL`]).
@@ -5279,16 +5279,19 @@ impl Footplate {
                         crate::voice::Provider::ElevenLabs => "with nobody speaking and nothing waited for",
                     }),
             );
+        let plain = gpui::StyledText::new(match provider {
+            crate::voice::Provider::OpenAi => VOICE_PLAIN,
+            crate::voice::Provider::ElevenLabs => ELEVENLABS_PLAIN,
+        });
+        #[cfg(test)]
+        self.voice_plain.replace(Some(plain.layout().clone()));
         section.child(
             div()
                 .debug_selector(|| "voice plain".to_string())
                 .pr_4()
                 .text_sm()
                 .text_color(palette.faint)
-                .child(match provider {
-                    crate::voice::Provider::OpenAi => VOICE_PLAIN,
-                    crate::voice::Provider::ElevenLabs => ELEVENLABS_PLAIN,
-                }),
+                .child(plain),
         )
     }
 
@@ -6955,11 +6958,6 @@ fn pose_shot_selection(
 mod tests {
     use super::*;
 
-    /// The line the Voice section says is held to everything a voice
-    /// session sends and keeps: microphone audio going to OpenAI, what
-    /// the person says, the yard's and the counterpart's names, their
-    /// answers, and the up-to-30-day abuse-monitoring retention with
-    /// `store` off. Every one of those is named in it.
     #[test]
     fn the_plain_line_names_all_a_voice_session_sends_and_keeps() {
         assert_eq!(

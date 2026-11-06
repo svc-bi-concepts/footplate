@@ -18,6 +18,74 @@ const START_WAIT: Duration = Duration::from_secs(20);
 const PENDING: &str = "pending: ordinary mail sent; no proven matching reply is available. Subsequent conversation mail is context, not this tool's result.";
 const UNCERTAIN: &str = "unavailable: delivery is unconfirmed and may have happened. Do not retry automatically. Check the written conversation.";
 
+/// Only known machine codes select local words. Provider prose can contain
+/// credentials, signed URLs or conversation text and is never displayed.
+fn refusal(status: u16, code: &str, signed: bool) -> String {
+    let reason = match code {
+        "quota_exceeded" | "insufficient_credits" => {
+            "quota exhausted; check your account's purchased credits"
+        }
+        "too_many_concurrent_requests" | "rate_limit_exceeded" | "rate_limited" | "system_busy" => {
+            "concurrency or rate limit reached; wait before starting again"
+        }
+        "invalid_api_key" | "authentication_error" => {
+            "authentication refused; check your ElevenLabs key"
+        }
+        "agent_not_found" | "model_not_found" | "model_unavailable" | "permission_denied" => {
+            "agent or model unavailable or forbidden; check access and configuration"
+        }
+        "token_expired" | "signed_url_expired" => "signed address expired",
+        _ => match status {
+            401 | 403 | 410 if signed => "signed address expired or refused",
+            410 => "signed address expired",
+            401 => "authentication refused; check your ElevenLabs key",
+            403 | 404 => "agent or model unavailable or forbidden; check access and configuration",
+            402 => "quota exhausted; check your account's purchased credits",
+            429 => "concurrency or rate limit reached; wait before starting again",
+            _ => "request refused; check your Agent configuration",
+        },
+    };
+    let status = if status == 0 {
+        String::new()
+    } else {
+        format!(" (HTTP {status})")
+    };
+    format!(
+        "ElevenLabs {reason}{status}. Voice stopped. Start again explicitly; mail is never retried and no provider or billing fallback is made."
+    )
+}
+
+fn error_code(event: &Value) -> &str {
+    event
+        .pointer("/error_event/error_name")
+        .or_else(|| event.pointer("/detail/status"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+fn connection_error(error: WsError) -> String {
+    match error {
+        WsError::Refused(text) => {
+            let status = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            refusal(status, "", true)
+        }
+        WsError::Io(_) | WsError::Closed => "ElevenLabs network connection lost. Voice stopped; start again explicitly. Mail is never retried.".into(),
+        _ => "ElevenLabs sent an unsupported session event. Voice stopped; start again explicitly. Mail is never retried.".into(),
+    }
+}
+
+/// Reference call component at $0.08/min, before discounts, without burst
+/// pricing. LLM tokens and account entitlements are deliberately unknown.
+pub(crate) fn meter(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let call = elapsed.as_secs_f64() * 0.08 / 60.0;
+    format!(
+        "{}:{:02} connected · call ~${call:.2} · LLM extra",
+        seconds / 60,
+        seconds % 60
+    )
+}
+
 fn identifier(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
@@ -142,8 +210,10 @@ fn gated_start(
             match result {
                 Ok(mut conn) if !control.stopped() => {
                     let mut session = Session::new(control.clone(), speaker.clone(), tell.clone());
-                    if session.follow(&mut conn, &heard).is_err() && !control.stopped() {
-                        let _ = tell.send(Update::Refused("The ElevenLabs session ended or sent an unsupported event. Start again explicitly; mail is never retried.".into()));
+                    if let Err(error) = session.follow(&mut conn, &heard)
+                        && !control.stopped()
+                    {
+                        let _ = tell.send(Update::Refused(connection_error(error)));
                     }
                 }
                 Err(why) if !control.stopped() => {
@@ -179,14 +249,15 @@ fn site_json(
             control.follow_site(stop)
         });
     control.0.inner.lock().unwrap().site = None;
-    // Status only: error bodies, redirects and transport errors may echo a
-    // key or a signed URL. None of that enters the UI, log or telemetry.
+    // Only a known machine code is read from error bodies, which can echo
+    // credentials. Provider prose never enters the UI, log or telemetry.
     let (status, body) =
-        response.map_err(|_| "ElevenLabs did not answer. No automatic retry was made.")?;
+        response.map_err(|_| "ElevenLabs network request failed. Voice stopped; start again explicitly. No automatic retry was made.")?;
     if status != 200 {
-        return Err(format!(
-            "ElevenLabs refused the request (HTTP {status}). Check the agent and key; start again explicitly."
-        ));
+        let event: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        // A refusal while minting a URL is still an account refusal;
+        // only the subsequent WebSocket upgrade consumes an expiring URL.
+        return Err(refusal(status, error_code(&event), false));
     }
     serde_json::from_slice(&body).map_err(|_| "ElevenLabs returned an unreadable response".into())
 }
@@ -241,7 +312,8 @@ fn connect(
     }
     // The signed URL expires for a new connection after 15 minutes. It is
     // consumed immediately, once, with no reconnect or refresh loop.
-    let mut conn = WsConn::connect_controlled(&url, &[], Some(control)).map_err(|_| "ElevenLabs refused the signed connection. Its address may have expired; start again explicitly.")?;
+    let mut conn =
+        WsConn::connect_controlled(&url, &[], Some(control)).map_err(connection_error)?;
     if control.stopped() {
         return Err("session stopped".into());
     }
@@ -555,10 +627,14 @@ impl Session {
                             .map_err(|_| ws_protocol("invalid Agent JSON"))?,
                     )?,
                     WsIncoming::Ping(_) => {}
-                    WsIncoming::Close(..) => {
-                        let _ = self
-                            .tell
-                            .send(Update::Ended("ElevenLabs closed the session".into()));
+                    WsIncoming::Close(code, reason) => {
+                        let words = if code == Some(1000) {
+                            "ElevenLabs closed the session. Start again explicitly.".into()
+                        } else {
+                            let event: Value = serde_json::from_str(&reason).unwrap_or(Value::Null);
+                            refusal(0, error_code(&event), false)
+                        };
+                        let _ = self.tell.send(Update::Refused(words));
                         return Ok(());
                     }
                     _ => {}
@@ -665,7 +741,12 @@ impl Session {
                 );
                 self.speaker.lock().unwrap().push(pcm, Instant::now());
             }
-            Some("error" | "client_error") => return Err(ws_protocol("Agent refused the session")),
+            Some("error" | "client_error") => {
+                let _ = self
+                    .tell
+                    .send(Update::Refused(refusal(0, error_code(&event), false)));
+                self.control.stop();
+            }
             _ => {}
         }
         Ok(())
@@ -682,7 +763,7 @@ pub(crate) mod stand_in {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     pub(crate) struct SocketAgent {
-        endpoint: Endpoint,
+        pub(super) endpoint: Endpoint,
         stopped: Arc<AtomicBool>,
         active: Arc<Mutex<Option<TcpStream>>>,
         thread: Option<JoinHandle<()>>,
@@ -997,6 +1078,168 @@ mod tests {
     }
 
     #[test]
+    fn reference_meter_separates_calls_from_unknown_llm_usage() {
+        for (seconds, time, cost) in [
+            (0, "0:00", "0.00"),
+            (60, "1:00", "0.08"),
+            (300, "5:00", "0.40"),
+            (3600, "60:00", "4.80"),
+        ] {
+            assert_eq!(
+                meter(Duration::from_secs(seconds)),
+                format!("{time} connected · call ~${cost} · LLM extra")
+            );
+        }
+        assert_eq!(
+            meter(Duration::from_millis(59_999)),
+            "0:59 connected · call ~$0.08 · LLM extra"
+        );
+    }
+
+    #[test]
+    fn agent_contract_refusal_envelopes() {
+        for event in [
+            json!({"detail": {"status": "quota_exceeded"}}),
+            json!({"error_event": {"error_name": "quota_exceeded"}}),
+        ] {
+            assert!(refusal(0, error_code(&event), false).contains("quota exhausted"));
+        }
+        for event in [
+            json!({"error": {"code": "quota_exceeded"}}),
+            json!({"error_type": "quota_exceeded"}),
+            json!({"code": "quota_exceeded"}),
+            json!({"detail": {"message": "SECRET"}}),
+            json!({"error_event": {"error_name": "SECRET"}}),
+        ] {
+            let why = refusal(0, error_code(&event), false);
+            assert!(why.contains("request refused"), "{why}");
+            assert!(!why.contains("quota exhausted") && !why.contains("SECRET"));
+        }
+    }
+
+    #[test]
+    fn machine_codes_select_local_refusals_and_unknown_prose_is_discarded() {
+        for (code, expected) in [
+            ("invalid_api_key", "authentication"),
+            ("permission_denied", "forbidden"),
+            ("model_unavailable", "unavailable"),
+            ("signed_url_expired", "expired"),
+            ("too_many_concurrent_requests", "concurrency"),
+            ("rate_limit_exceeded", "rate limit"),
+            ("quota_exceeded", "quota exhausted"),
+            ("SECRET wss://example.invalid", "request refused"),
+        ] {
+            let why = refusal(0, code, false);
+            assert!(why.contains(expected), "{why}");
+            assert!(!why.contains("SECRET") && !why.contains("wss://"));
+        }
+    }
+
+    #[test]
+    fn terminal_refusals_end_the_socket_clear_audio_and_never_retry() {
+        for (code, expected) in [
+            ("invalid_api_key", "authentication"),
+            ("model_unavailable", "unavailable"),
+            ("signed_url_expired", "expired"),
+            ("rate_limit_exceeded", "rate limit"),
+            ("quota_exceeded", "quota exhausted"),
+        ] {
+            let agent = Arc::new(Agent::new());
+            let fake = SocketAgent::start(agent.clone());
+            let (voice, told) = started(&fake);
+            let mic = voice.microphone();
+            let speaker = voice.speaker();
+            speaker.lock().unwrap().push(vec![1; 2400], Instant::now());
+            agent.emit(json!({"type": "client_error", "error_event": {"code": 1008, "error_name": code, "message": "fake-eleven-key SECRET wss://example.invalid"}}));
+            let Update::Refused(why) = told.recv_timeout(Duration::from_secs(4)).unwrap() else {
+                panic!()
+            };
+            assert!(why.contains(expected), "{why}");
+            assert!(!why.contains("SECRET") && !why.contains("fake-eleven-key"));
+            wait_for(|| !mic.send(vec![0; 480]));
+            voice.stop();
+            assert_eq!(speaker.lock().unwrap().queued_ms(), 0);
+            assert_eq!(
+                agent.heads.lock().unwrap().len(),
+                3,
+                "one authentication and signed URL, no reconnect"
+            );
+            assert!(told.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn quota_during_an_outstanding_tool_does_not_replay_or_mark_mail_unsent() {
+        let agent = Arc::new(Agent::new());
+        let fake = SocketAgent::start(agent.clone());
+        let (voice, told) = started(&fake);
+        agent.tool("sent", "Check Bead 42");
+        let Update::Tool { id, text, .. } = told.recv_timeout(Duration::from_secs(4)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(text, "Check Bead 42");
+        // The window has received the write; hold its completion while
+        // quota ends the provider. The write belongs to the yard now.
+        agent.emit(json!({"type":"client_error","error_event":{"code":1008,"error_name":"quota_exceeded","message":"SECRET"}}));
+        let Update::Refused(why) = told.recv_timeout(Duration::from_secs(4)).unwrap() else {
+            panic!()
+        };
+        assert!(why.contains("quota exhausted"));
+        wait_for(|| voice.thread.as_ref().unwrap().is_finished());
+        voice.tool_result(id, true);
+        voice.context(25, "chris", "Late written reply");
+        voice.stop();
+        assert!(
+            told.try_recv().is_err(),
+            "no repeated tool or unsent update"
+        );
+        assert!(agent.sent("client_tool_result").is_empty());
+        assert!(agent.sent("contextual_update").is_empty());
+        assert_eq!(agent.heads.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn network_loss_is_local_and_does_not_mint_another_url() {
+        let agent = Arc::new(Agent::new());
+        let fake = SocketAgent::start(agent.clone());
+        let (voice, told) = started(&fake);
+        drop(fake);
+        let Update::Refused(why) = told.recv_timeout(Duration::from_secs(4)).unwrap() else {
+            panic!()
+        };
+        assert!(why.contains("network"), "{why}");
+        voice.stop();
+        assert_eq!(agent.heads.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn missing_or_invalid_keys_refuse_before_any_provider_request() {
+        let agent = Arc::new(Agent::new());
+        let fake = SocketAgent::start(agent.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        for key in [None, Some("SECRET unsafe key".into())] {
+            let (tell, _) = mpsc::channel();
+            let Start::Refused(why) = gated_start(
+                true,
+                || crate::yard::provider_key_as(Provider::ElevenLabs, key, Some(&settings)),
+                "agent_test",
+                "",
+                "south",
+                "chris",
+                tell,
+                fake.endpoint.clone(),
+            ) else {
+                panic!()
+            };
+            assert!(why.contains("ElevenLabs"));
+            assert!(!why.contains("SECRET"));
+        }
+        assert!(agent.heads.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn off_and_invalid_configuration_read_no_key_and_open_nothing() {
         let (tell, _) = mpsc::channel();
         assert!(matches!(
@@ -1073,7 +1316,10 @@ mod tests {
         for (status, signed) in [
             (401, false),
             (302, false),
+            (403, false),
             (404, false),
+            (402, false),
+            (429, false),
             (401, true),
             (410, true),
             (302, true),
@@ -1093,6 +1339,12 @@ mod tests {
                 panic!()
             };
             assert!(why.contains(&status.to_string()));
+            if status == 401 {
+                assert!(
+                    why.contains("authentication"),
+                    "signing still authenticates the key"
+                );
+            }
             assert!(
                 !why.contains("fake-eleven-key")
                     && !why.contains("FAKE-SIGNED-SECRET")

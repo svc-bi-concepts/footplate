@@ -2,6 +2,8 @@
 
 The single-provider choice below is historical. For the current provider
 choices, key handling and Agent setup, see [Voice settings](../window.md#settings).
+For ElevenLabs billing, privacy and refusal handling, see the
+[Agent guide](../window.md#elevenlabs-agent-template).
 
 Design footplate-vqze, proposed 2026-10-31 and corrected 2026-11-01 under footplate-nqjf to what OpenAI's Live reference and four live runs of the spike harness settled (section 2 names the runs). A proposal as it was decided on, not a description of what the code does today; the decision is on the bead.
 

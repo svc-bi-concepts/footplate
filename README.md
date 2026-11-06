@@ -13,7 +13,8 @@ stops the open yard the same way. Beside those two it starts nothing of
 yardr's. The conversations are as `yardr chat` shows them in a terminal.
 
 Optional voice is configured in [Voice settings](docs/window.md#settings),
-including provider choice, keys, data flow and Agent setup.
+including provider choice, keys and data flow. Before using ElevenLabs Agent,
+read its [setup, billing and privacy guidance](docs/window.md#elevenlabs-agent-template).
 
 ## Installing
 

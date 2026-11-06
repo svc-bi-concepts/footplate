@@ -405,7 +405,8 @@ folder. A change is drawn at once and kept for the next start:
   line under the head shows the latest ElevenLabs transcript, or with GPT-Live,
   what you have said that no request has taken yet (a pause does not clear it;
   a long one shows its last words), and
-  the head's right counts the elapsed time (ElevenLabs), or the minutes and
+  the head's right shows the [Agent meter](#elevenlabs-agent-template)
+  (ElevenLabs), or the minutes and
   what they have cost at OpenAI's
   rate, $0.05 a minute. When the voice sends something to the yard, it goes
   as your own mail in that conversation, as Enter would send it. With GPT-Live,
@@ -666,8 +667,42 @@ still need commissioning; tests use a fake provider, not a model.
   voice ID is selected. Footplate supplies its prompt bound to the
   conversation and yard chosen at start (see [Voice settings](#settings)).
   No full history, attachments or secret ask contents are uploaded.
-- Check your account's retention, training/data-use settings and costs before
-  a live run. This change does not inspect or alter those settings.
+- Before commissioning, check and record retention, audio saving and training
+  choices. Recommend audio saving off, zero-day scheduled deletion where
+  available, and training opt-out; these are recommendations, not configured
+  account settings or Enterprise Zero Retention Mode (ZRM).
+
+ElevenLabs' [documented default retention](https://elevenlabs.io/docs/eleven-agents/customization/privacy/retention)
+is two years, with separate transcript and audio controls that can be changed.
+Training opt-out affects future submissions and is separate from deletion.
+[ZRM](https://elevenlabs.io/docs/eleven-api/resources/zero-retention-mode) and
+[EU residency](https://elevenlabs.io/docs/overview/administration/data-residency)
+need eligible Enterprise access and configuration. EU storage alone does not
+ensure EU-only processing. Footplate verifies none of these account choices and
+adds no audio archive or duplicate transcript store; written mail follows the
+yard's existing storage rules.
+
+The meter shows connected minutes and seconds, a **call-only estimate** at
+$0.08/min before discounts, excluding burst pricing, and **LLM extra**. Five
+minutes gives $0.40 for calls at that reference rate. It is no balance or exact
+bill: plan entitlement, included minutes and LLM tokens are unknown. Published
+[call billing](https://elevenlabs.io/docs/help-center/product/eleven-agents/how-much-does-eleven-agents-cost)
+discounts silence longer than ten seconds by 95%; pending work can keep an idle
+session connected until its finite wait ends. Context grows with conversation
+length and LLM charges pass through separately. The ADR's starting assumption
+is Gemini 2.5 Flash-Lite ($0.10/M input and $0.40/M output tokens; regional
+pricing may differ); model availability and actual rates need commissioning.
+Check the workspace's Agents entitlement rather than assuming a subscription
+includes it. Above quota requires purchased PAYG credits or legacy usage
+billing. Footplate never buys credits, enables overage, selects a costlier model
+or switches to GPT-Live automatically.
+
+Missing or unsafe keys are refused locally. Authentication refusal, forbidden
+or unavailable agent/model, expired signed address, concurrency/rate limit,
+quota exhaustion and network loss end voice with local redacted words. Unknown
+provider prose is never displayed. There is no reconnect, signed-URL refresh
+loop or mail replay. Starting again is explicit; written mail remains readable,
+including late replies after a session ends.
 
 The session prompt is supplied by `hello` in
 [`src/voice/elevenlabs.rs`](../src/voice/elevenlabs.rs); no prompt template or

@@ -525,6 +525,8 @@ pub struct Footplate {
     elevenlabs_agent: Entity<Line>,
     elevenlabs_voice: Entity<Line>,
     voice_said: Option<String>,
+    #[cfg(test)]
+    voice_plain: std::cell::RefCell<Option<gpui::TextLayout>>,
     /// Whether the list of voices stands open under its field in the
     /// settings, as the yard's ⋯ menu stands open on its card: shut by a
     /// pick, by esc, and by leaving the section.
@@ -984,6 +986,8 @@ impl Footplate {
             elevenlabs_agent,
             elevenlabs_voice,
             voice_said: None,
+            #[cfg(test)]
+            voice_plain: std::cell::RefCell::new(None),
             voice_menu: false,
             voice_inputs: None,
             voice_input_menu: false,
@@ -11611,6 +11615,64 @@ yardr.dev
     }
 
     #[gpui::test]
+    fn agent_contract_disclosure_is_rendered_for_the_selected_provider(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section voice");
+        for provider in [
+            "OpenAI GPT-Live",
+            "ElevenLabs Agent",
+            "OpenAI GPT-Live",
+            "ElevenLabs Agent",
+        ] {
+            click_on(cx, &format!("voice provider {provider}"));
+            assert!(drawn(cx, "voice plain"));
+            let text = view.read_with(cx, |v, _| v.voice_plain.borrow().as_ref().unwrap().text());
+            if provider == "OpenAI GPT-Live" {
+                assert!(text.contains("streams to OpenAI"));
+                assert!(!text.contains("ElevenLabs"));
+                continue;
+            }
+            for required in [
+                "microphone audio",
+                "transcripts",
+                "tool inputs",
+                "yard and crew names",
+                "returned yard mail",
+                "LLM provider",
+                "written yard mail is the record",
+                "call minutes",
+                "LLM usage",
+                "$0.08/min",
+                "burst pricing",
+                "95%",
+                "pending work",
+                "entitlement",
+                "PAYG",
+                "two years by default",
+                "separate transcript and audio",
+                "not configured or verified",
+                "future submissions",
+                "Enterprise Zero Retention",
+                "EU-only processing",
+                "no audio archive",
+                "owner-only on Unix",
+                "no microphone opens and no key is read",
+            ] {
+                assert!(text.contains(required), "missing {required}: {text}");
+            }
+        }
+    }
+
+    #[gpui::test]
     fn provider_settings_save_separate_masked_keys_without_starting_voice(cx: &mut TestAppContext) {
         use crate::voice::Provider;
         let dir = tempfile::tempdir().unwrap();
@@ -12256,6 +12318,47 @@ yardr.dev
                 .iter()
                 .filter(|e| e["tool_call_id"] == "uncertain")
                 .all(|e| e["is_error"] == true)
+        );
+        yard.answer("Mail", "{}");
+        agent.tool("quota-send", "Mail accepted before quota exhaustion");
+        wait(cx, "mail before quota", |_| {
+            yard.asked("Mail")
+                .iter()
+                .any(|a| a["text"] == "Mail accepted before quota exhaustion")
+        });
+        agent.emit(json!({"type":"client_error","error_event":{"code":1008,"error_name":"quota_exceeded","message":"SECRET"}}));
+        wait(cx, "quota stops voice", |cx| !voice_stands(&view, cx));
+        wait(cx, "quota closes audio", |_| {
+            voicing.open.load(Ordering::SeqCst) == 0
+        });
+        assert!(view.read_with(cx, |v, _| {
+            v.voice_refusal
+                .as_ref()
+                .unwrap()
+                .contains("quota exhausted")
+        }));
+        yard.emit(&answer_event(25, "Late reply after voice quota"));
+        wait(cx, "late written reply", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .unwrap()
+                    .entries()
+                    .iter()
+                    .any(|m| m.text == "Late reply after voice quota")
+            })
+        });
+        assert_eq!(
+            yard.asked("Mail")
+                .iter()
+                .filter(|a| a["text"] == "Mail accepted before quota exhaustion")
+                .count(),
+            1
+        );
+        assert_eq!(agent.heads.lock().unwrap().len(), 3);
+        assert_eq!(
+            settings_of(&view, cx).voice_provider,
+            voice::Provider::ElevenLabs
         );
         // The current session's late completion and a queued tool from the
         // old session cannot post into the next conversation after a switch.

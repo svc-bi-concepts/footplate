@@ -2401,8 +2401,7 @@ impl Voice {
         if self.provider.is_openai() {
             meter(elapsed)
         } else {
-            let seconds = elapsed.as_secs();
-            format!("{}:{:02} · ElevenLabs", seconds / 60, seconds % 60)
+            elevenlabs::meter(elapsed)
         }
     }
 
