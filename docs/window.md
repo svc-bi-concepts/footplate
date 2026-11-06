@@ -397,8 +397,9 @@ folder. A change is drawn at once and kept for the next start:
   Send once the line holds words or a file; and Stop while a session
   stands, whatever the line holds, which a second tap ends without
   sending what you typed (it stays in the line, and Enter sends it).
-  With ElevenLabs selected and no conversation open, Voice in the rail opens
-  yardmaster-chris and starts a session there.
+  With ElevenLabs selected, the yard connected and no conversation open,
+  Voice in the rail opens yardmaster-chris and starts a session there. If that
+  conversation is absent, a notice asks you to open a conversation instead.
   While a session stands, quiet words beside the button say what is going
   on (`starting…`, `listening`, `yardmaster is working`, `speaking`), a
   line under the head shows the latest ElevenLabs transcript, or with GPT-Live,
@@ -662,8 +663,8 @@ still need commissioning; tests use a fake provider, not a model.
   this tool; use no webhook, workflow, other action tools or imported yard history.
 - Permit the system prompt override (`agent.prompt.prompt` in the conversation
   initiation overrides), and the `tts.voice_id` override only if a desktop
-  voice ID is selected. Footplate supplies its prompt bound to the open
-  conversation and yard; without a conversation it opens yardmaster-chris.
+  voice ID is selected. Footplate supplies its prompt bound to the
+  conversation and yard chosen at start (see [Voice settings](#settings)).
   No full history, attachments or secret ask contents are uploaded.
 - Check your account's retention, training/data-use settings and costs before
   a live run. This change does not inspect or alter those settings.

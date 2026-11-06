@@ -460,7 +460,7 @@ pub(crate) struct Talk {
     /// The conversation voiced, by the name its row has.
     pub(crate) with: String,
     /// The microphone and the speaker, once the session stands. Dropped
-    /// before the session is stopped.
+    /// when the session ends.
     pub(crate) devices: Option<Box<dyn Any + Send>>,
     pub(crate) voice: Voice,
     /// The speaker's end of the session, to read what is queued from.
@@ -470,24 +470,24 @@ pub(crate) struct Talk {
     pub(crate) _updates: Task<()>,
     /// When the session stood, which its minutes count from: none before.
     pub(crate) stood: Option<Instant>,
-    /// What the person has said that no request has taken, which the
-    /// caption shows.
+    /// GPT-Live's words not yet taken by a request, or the latest Agent
+    /// transcript, which the caption shows.
     pub(crate) caption: Caption,
     /// The window's own words in the caption's place, where what was said did
     /// not go to the yard: why. Gone when the person speaks again.
     pub(crate) words: Option<String>,
-    /// A request's mail is sent and its answer not yet in: the yard is
-    /// working.
+    /// GPT-Live awaits an answer, or an Agent's mail call awaits completion.
+    /// The Agent's finite wait also releases this idle exception.
     pub(crate) unanswered: bool,
     /// Since when nobody has spoken and no request waited.
     pub(crate) quiet_since: Instant,
     pub(crate) speaking: Speaking,
-    /// The newest mail of the other side that the voice has been given: one
-    /// the stream tells of twice is spoken once.
+    /// Mail at or below this sequence is never forwarded again. An Agent
+    /// starts at the model's head so earlier mail stays local.
     pub(crate) answered_through: u64,
     /// What the window draws: the state's words beside the composer's
-    /// button and the minutes and cost in the head, as the last look at the
-    /// session saw them.
+    /// button and the provider's time meter in the head, as the last look
+    /// at the session saw them.
     pub(crate) state: State,
     pub(crate) meter: String,
 }
