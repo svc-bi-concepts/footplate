@@ -1,0 +1,8 @@
+# The fork's local gate is authoritative; it runs no GitHub CI.
+commands:
+  test: 'sh .yardr/test'
+no_ci: true
+
+# Keep pull requests aligned with the yard's integrations/pr-standard.md.
+pr:
+  template: .github/pr-template.md
