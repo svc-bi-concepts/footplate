@@ -1151,6 +1151,37 @@ mod tests {
     }
 
     #[test]
+    fn quota_during_an_outstanding_tool_does_not_replay_or_mark_mail_unsent() {
+        let agent = Arc::new(Agent::new());
+        let fake = SocketAgent::start(agent.clone());
+        let (voice, told) = started(&fake);
+        agent.tool("sent", "Check Bead 42");
+        let Update::Tool { id, text, .. } = told.recv_timeout(Duration::from_secs(4)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(text, "Check Bead 42");
+        // The window has received the write; hold its completion while
+        // quota ends the provider. The write belongs to the yard now.
+        agent.emit(json!({"type":"client_error","error_event":{"code":1008,"error_name":"quota_exceeded","message":"SECRET"}}));
+        let Update::Refused(why) = told.recv_timeout(Duration::from_secs(4)).unwrap() else {
+            panic!()
+        };
+        assert!(why.contains("quota exhausted"));
+        wait_for(|| voice.thread.as_ref().unwrap().is_finished());
+        voice.tool_result(id, true);
+        voice.context(25, "chris", "Late written reply");
+        voice.stop();
+        assert!(
+            told.try_recv().is_err(),
+            "no repeated tool or unsent update"
+        );
+        assert!(agent.sent("client_tool_result").is_empty());
+        assert!(agent.sent("contextual_update").is_empty());
+        assert_eq!(agent.heads.lock().unwrap().len(), 3);
+    }
+
+    #[test]
     fn network_loss_is_local_and_does_not_mint_another_url() {
         let agent = Arc::new(Agent::new());
         let fake = SocketAgent::start(agent.clone());
