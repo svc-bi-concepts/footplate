@@ -345,6 +345,21 @@ fn configuration(config: &Value, tools: &[Value], voice_override: bool) -> Resul
     {
         return Err("Use an Agent without a workflow or webhooks.".into());
     }
+    let language_detection = |tool: &Value| {
+        tool["type"] == "system"
+            && tool["name"] == "language_detection"
+            && tool["params"]["system_tool_type"] == "language_detection"
+    };
+    let built_in = &config["conversation_config"]["agent"]["prompt"]["built_in_tools"];
+    if !built_in.is_null()
+        && !built_in.as_object().is_some_and(|tools| {
+            tools.iter().all(|(name, tool)| {
+                tool.is_null() || (name == "language_detection" && language_detection(tool))
+            })
+        })
+    {
+        return Err("Use only the language_detection built-in system tool.".into());
+    }
     // The agent's inline tools mirror tool_ids. Only identical client
     // configurations can stand for the same tool in both representations.
     let mut clients = BTreeMap::new();
@@ -356,9 +371,7 @@ fn configuration(config: &Value, tools: &[Value], voice_override: bool) -> Resul
                     return Err("Conflicting client tool configurations.".into());
                 }
             }
-            Some("system")
-                if tool["name"] == "language_detection"
-                    && tool["params"]["system_tool_type"] == "language_detection" => {}
+            Some("system") if language_detection(tool) => {}
             _ => {
                 return Err("Use only send_to_yard and the language_detection system tool.".into());
             }
@@ -1509,6 +1522,58 @@ mod tests {
         assert!(heads[2].contains("get-signed-url"));
         voice.stop();
         assert!(agent.errors.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn real_agent_shape_checks_every_enabled_built_in_before_signing() {
+        let config = real_agent_config();
+        let tools = config["conversation_config"]["agent"]["prompt"]["tools"]
+            .as_array()
+            .unwrap();
+        let language = json!({"type": "system", "name": "language_detection",
+            "params": {"system_tool_type": "language_detection"}});
+        for built_in in [
+            Value::Null,
+            json!({}),
+            json!({"end_call": null, "language_detection": language}),
+        ] {
+            let mut compatible = config.clone();
+            compatible["conversation_config"]["agent"]["prompt"]["built_in_tools"] = built_in;
+            assert!(configuration(&compatible, tools, true).is_ok());
+        }
+        for built_in in [
+            json!({"language_detection": language, "end_call": {
+                "type": "system", "name": "end_call",
+                "params": {"system_tool_type": "end_call"}
+            }}),
+            json!({"end_call": language}),
+            json!({"language_detection": {"type": "system", "name": "end_call",
+                "params": {"system_tool_type": "language_detection"}}}),
+            json!({"language_detection": {"type": "system", "name": "language_detection",
+                "params": {"system_tool_type": "end_call"}}}),
+            json!({"language_detection": tools[0]}),
+            json!({"language_detection": {}}),
+            json!([]),
+        ] {
+            let mut bad = config.clone();
+            bad["conversation_config"]["agent"]["prompt"]["built_in_tools"] = built_in.clone();
+            assert!(configuration(&bad, tools, true).is_err(), "{built_in}");
+            let agent = Arc::new(Agent::new());
+            *agent.config.lock().unwrap() = bad;
+            let fake = SocketAgent::start(agent.clone());
+            let (tell, told) = mpsc::channel();
+            let Start::On(voice) = fake.start_voice(true, "south", "chris", tell) else {
+                panic!()
+            };
+            assert!(matches!(
+                told.recv_timeout(Duration::from_secs(4)).unwrap(),
+                Update::Refused(_)
+            ));
+            voice.stop();
+            let heads = agent.heads.lock().unwrap();
+            assert_eq!(heads.len(), 2);
+            assert!(heads[1].starts_with("GET /v1/convai/tools/tool_test "));
+        }
     }
 
     #[test]
