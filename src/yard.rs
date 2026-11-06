@@ -366,7 +366,7 @@ pub(crate) struct KeptKind {
     /// read without one; a voice key has no such legacy form.
     marker_required: bool,
     /// Whether the file may name the yard or edge the credential is for.
-    /// A voice key is for OpenAI and has no address.
+    /// A voice key is for its provider and has no address.
     has_address: bool,
     /// `token`, `session` or `voice key`, as a refusal names the file and
     /// what it holds.
@@ -375,7 +375,7 @@ pub(crate) struct KeptKind {
     /// mode is read, which Windows has none to.
     #[cfg_attr(not(unix), allow(dead_code))]
     open: &'static str,
-    /// What gave the token: `the yard`, `signing in` or `OpenAI`.
+    /// What gave the token: the yard, signing in or the voice provider.
     giver: &'static str,
 }
 
@@ -490,7 +490,7 @@ fn kept_as(file: &Path, kind: KeptKind) -> Result<KeptToken, String> {
         .map_err(|err| format!("The {noun} file {at} cannot be read: {err}"))?;
     let ends_newline = text.ends_with('\n');
     // A voice key stands with the marker under it and no address: it is
-    // for OpenAI, not for one yard.
+    // for its provider, not for one yard.
     let none = || match noun {
         "voice key" => format!(
             "The voice key file {at} holds no voice key: one is a line, as OpenAI gave it, with footplate's marker under it."

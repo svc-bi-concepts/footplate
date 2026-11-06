@@ -355,7 +355,9 @@ folder. A change is drawn at once and kept for the next start:
   `FOOTPLATE_OPENAI_KEY` is set it is read first and the file is not
   read. ElevenLabs instead uses `elevenlabs.key` and
   `FOOTPLATE_ELEVENLABS_KEY`; the files use distinct markers and the same
-  owner-only keeper. When Agent sessions become available, the ElevenLabs key
+  keeper. On macOS and Linux it writes mode 0600 and refuses files readable
+  by others; on Windows it relies on the profile directory's permissions.
+  When Agent sessions become available, the ElevenLabs key
   authenticates with ElevenLabs; it never enters settings JSON, yard mail or
   telemetry. The non-secret `elevenlabs_agent` and `elevenlabs_voice`
   IDs live in settings JSON, separately from OpenAI's `voice_name`. Empty voice
@@ -368,8 +370,8 @@ folder. A change is drawn at once and kept for the next start:
   may paraphrase and written yard mail remains the record. Footplate adds no
   saved audio or transcript history. Workspace retention and model-improvement
   settings are unverified: check them before live use rather than assuming
-  account opt-outs or zero retention. Under the field, one plain line says what a voice session
-  sends to OpenAI and what is kept of it. The section's `voice` picker
+  account opt-outs or zero retention. The section's disclosure describes the
+  selected provider's data flow and retention. With OpenAI selected, the `voice` picker
   chooses which of OpenAI's voices speaks: a field with a chevron, which
   opens the list of the thirty-one the Live reference gives, with a note of
   language and accent on each OpenAI's guide describes, and `default` first,
@@ -391,7 +393,8 @@ folder. A change is drawn at once and kept for the next start:
   and the field says `not found` beside its id until it is back. With voice
   on, the composer of an
   open conversation has one button at its bottom right: Voice while the
-  line is empty, and a tap starts a session with whom you are talking;
+  line is empty, and a tap starts an OpenAI session with whom you are talking
+  or shows the unavailable-backend refusal for ElevenLabs;
   Send once the line holds words or a file; and Stop while a session
   stands, whatever the line holds, which a second tap ends without
   sending what you typed (it stays in the line, and Enter sends it).
@@ -652,8 +655,9 @@ created by footplate. The configuration alone does not enable Agent start.
   where supported; disable unapproved backup-model cascading. Availability and
   bilingual tool-call quality still need a live check later.
 - Define one client tool, `send_to_yard`, with required string `text` and
-  **Wait for response** enabled. The desktop implements this tool, with no
-  webhook, other action tools, knowledge base or imported yard history.
+  **Wait for response** enabled. The planned desktop backend will implement
+  this tool; use no webhook, other action tools, knowledge base or imported
+  yard history.
 - Permit only the session variables/overrides needed for the selected yard and
   conversation. Use the open conversation, defaulting to yardmaster-chris where
   none is selected, when the backend is implemented.

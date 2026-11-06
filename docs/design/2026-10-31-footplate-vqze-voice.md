@@ -1,17 +1,7 @@
 # Talk with the yard by voice in footplate
 
-Update, 6 November 2026: the former single-provider choice below is superseded
-in this fork by ADR 0006 (optional ElevenLabs Agent, with OpenAI GPT-Live kept
-selectable). The first implementation adds provider selection and isolated
-local keys only. It reuses Settings, the masked Line and owner-only keeper,
-plus the request/answer/stop seam, without changing GPT-Live's wire events.
-ElevenAgents start is explicitly refused until its separate backend is ready.
-Voice remains off by default; neither key is read and no provider contacted
-while off. Each provider has its own disclosure and non-secret configuration;
-keys never enter settings JSON, mail or telemetry. Provider/key/agent changes
-stop the session and require another explicit start. See
-[Voice settings and manual Agent template](../window.md#settings).
-
+The single-provider choice below is historical. For the current provider
+choices, key handling and Agent setup, see [Voice settings](../window.md#settings).
 
 Design footplate-vqze, proposed 2026-10-31 and corrected 2026-11-01 under footplate-nqjf to what OpenAI's Live reference and four live runs of the spike harness settled (section 2 names the runs). A proposal as it was decided on, not a description of what the code does today; the decision is on the bead.
 
