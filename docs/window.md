@@ -355,7 +355,9 @@ folder. A change is drawn at once and kept for the next start:
   `FOOTPLATE_OPENAI_KEY` is set it is read first and the file is not
   read. ElevenLabs instead uses `elevenlabs.key` and
   `FOOTPLATE_ELEVENLABS_KEY`; the files use distinct markers and the same
-  owner-only keeper. The non-secret `elevenlabs_agent` and `elevenlabs_voice`
+  owner-only keeper. When Agent sessions become available, the ElevenLabs key
+  authenticates with ElevenLabs; it never enters settings JSON, yard mail or
+  telemetry. The non-secret `elevenlabs_agent` and `elevenlabs_voice`
   IDs live in settings JSON, separately from OpenAI's `voice_name`. Empty voice
   ID leaves the Agent's configured voice in place. Enter or the save button
   keeps the two IDs. Configure an already existing workspace agent manually
