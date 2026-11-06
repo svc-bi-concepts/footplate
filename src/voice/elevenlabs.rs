@@ -254,7 +254,6 @@ fn connect(
 
 fn configuration(config: &Value, tools: &[Value], voice_override: bool) -> Result<(), String> {
     let platform = &config["platform_settings"];
-    let prompt = &config["conversation_config"]["agent"]["prompt"];
     let overrides = &platform["overrides"]["conversation_config_override"];
     if platform["auth"]["enable_auth"] != true
         || overrides["agent"]["prompt"]["prompt"] != true
@@ -262,17 +261,14 @@ fn configuration(config: &Value, tools: &[Value], voice_override: bool) -> Resul
     {
         return Err("Require Agent authentication and permit the prompt override (and voice override when selected).".into());
     }
-    if prompt["knowledge_base"]
-        .as_array()
+    if config["workflow"]["nodes"]
+        .as_object()
         .is_some_and(|a| !a.is_empty())
-        || config["workflow"]["nodes"]
-            .as_object()
-            .is_some_and(|a| !a.is_empty())
         || platform["workspace_overrides"]["conversation_initiation_client_data_webhook"]
             .is_object()
         || platform["workspace_overrides"]["webhooks"]["post_call_webhook_id"].is_string()
     {
-        return Err("Use an Agent without a knowledge base, workflow or webhooks.".into());
+        return Err("Use an Agent without a workflow or webhooks.".into());
     }
     if tools.len() != 1 {
         return Err("Configure exactly one send_to_yard client tool.".into());
@@ -958,8 +954,10 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_start_uses_only_the_site_key_and_binds_the_captured_conversation() {
+    fn authenticated_start_accepts_a_knowledge_base_and_binds_the_captured_conversation() {
         let agent = Arc::new(Agent::new());
+        agent.config.lock().unwrap()["conversation_config"]["agent"]["prompt"]["knowledge_base"] =
+            json!([{"type": "text", "name": "General reference", "id": "reference_test"}]);
         let fake = SocketAgent::start(agent.clone());
         let (voice, _) = started(&fake);
         let heads = agent.heads.lock().unwrap().clone();
