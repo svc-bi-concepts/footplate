@@ -2722,7 +2722,7 @@ impl Agent {
                 }},
                 "conversation_config": {"agent": {"language": "de", "prompt": {
                     "tools": [{"type": "client", "name": "send_to_yard", "expects_response": true,
-                        "response_timeout_secs": 20,
+                        "response_timeout_secs": 30,
                         "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]
                 }}}
             })),

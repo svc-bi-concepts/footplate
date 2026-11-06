@@ -653,8 +653,9 @@ still need commissioning; tests use a fake provider, not a model.
   and English language switching and interruptions. Try Swiss German during
   commissioning; it is not required.
 - Define one client tool, `send_to_yard`, with required string `text` and
-  **Wait for response** enabled and a **20-second response timeout**. The
-  desktop implements this tool; use no webhook, workflow, other action tools,
+  **Wait for response** enabled. Footplate bounds its own wait to 20 seconds,
+  independently of the Agent's response timeout. The desktop implements this
+  tool; use no webhook, workflow, other action tools,
   knowledge base or imported yard history.
 - Permit the system prompt override (`agent.prompt.prompt` in the conversation
   initiation overrides), and the `tts.voice_id` override only if a desktop

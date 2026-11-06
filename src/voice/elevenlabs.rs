@@ -282,13 +282,12 @@ fn configuration(config: &Value, tools: &[Value], voice_override: bool) -> Resul
     if t["type"] != "client"
         || t["name"] != "send_to_yard"
         || t["expects_response"] != true
-        || t["response_timeout_secs"].as_u64() != Some(WAIT.as_secs())
         || params["type"] != "object"
         || params["properties"]["text"]["type"] != "string"
         || params["properties"].as_object().map(|p| p.len()) != Some(1)
         || params["required"] != json!(["text"])
     {
-        return Err("Configure send_to_yard(text: string), Wait for response, and a 20-second timeout, with no other parameters.".into());
+        return Err("Configure send_to_yard(text: string) with Wait for response and no other parameters.".into());
     }
     Ok(())
 }
@@ -1115,13 +1114,17 @@ mod tests {
         }
         for (path, value) in [
             ("/expects_response", json!(false)),
-            ("/response_timeout_secs", json!(60)),
             ("/parameters/properties/text/type", json!("number")),
             ("/name", json!("approve")),
         ] {
             let mut bad = tools.clone();
             *bad[0].pointer_mut(path).unwrap() = value;
             assert!(configuration(&config, &bad, true).is_err());
+        }
+        for timeout in [10, 30, 60] {
+            let mut compatible = tools.clone();
+            compatible[0]["response_timeout_secs"] = json!(timeout);
+            assert!(configuration(&config, &compatible, true).is_ok());
         }
         for prompt in [
             json!({"llm": "another-model", "backup_llm_config": {"type": "default"}, "thinking_budget": 1024}),
