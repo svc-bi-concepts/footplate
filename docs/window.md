@@ -661,7 +661,10 @@ still need commissioning; tests use a fake provider, not a model.
   commissioning; it is not required.
 - Define one client tool, `send_to_yard`, with required string `text` and
   **Wait for response** enabled and no other parameters. The desktop implements
-  this tool; use no webhook, workflow, other action tools or imported yard history.
+  this tool. The only allowed system tool is `language_detection` for German/English
+  switching. The default workflow with just a start node, no edges and no
+  subgraphs is fine; use no other workflow, webhooks, other action tools or
+  imported yard history.
 - Permit the system prompt override (`agent.prompt.prompt` in the conversation
   initiation overrides), and the `tts.voice_id` override only if a desktop
   voice ID is selected. Footplate supplies its prompt bound to the
