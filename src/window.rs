@@ -12333,8 +12333,15 @@ yardr.dev
             view.update(cx, |v, cx| {
                 v.pick_provider(voice::Provider::ElevenLabs, cx);
                 v.voice_on(true, cx);
-                v.toggle_voice(cx);
+                let selected = if reason == "idle" {
+                    Selected::Yard
+                } else {
+                    Selected::Arrivals
+                };
+                v.change(cx, |m| m.select(selected));
             });
+            assert!(view.read_with(cx, |v, _| v.open().is_none()));
+            click_on(cx, "rail voice");
             wait(cx, "Agent audio open", |_| {
                 voicing.open.load(Ordering::SeqCst) == 1
             });

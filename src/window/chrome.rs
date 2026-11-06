@@ -6270,6 +6270,35 @@ impl Footplate {
                         })),
                 );
         }
+        if live
+            && !away
+            && self.settings.voice
+            && self.settings.voice_provider == crate::voice::Provider::ElevenLabs
+            && self.open().is_none()
+        {
+            rail = rail.child(
+                div()
+                    .id("rail voice")
+                    .debug_selector(|| "rail voice".to_string())
+                    .w(px(RAIL_TILE))
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .py_2()
+                    .mt_1()
+                    .text_size(px(RAIL_LABEL))
+                    .text_color(palette.text)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(palette.hover))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_voice(cx)))
+                    .tooltip(|_, cx| {
+                        cx.new(|_| RailTip("voice: talk with yardmaster-chris by voice".into()))
+                            .into()
+                    })
+                    .child("Voice"),
+            );
+        }
         rail = rail.child(div().flex_1().min_h_0());
         // The foot: Feedback where it is offered, then the settings' gear
         // with its label. The yards are switched from the chip at the

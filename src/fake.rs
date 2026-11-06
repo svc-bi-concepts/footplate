@@ -2721,7 +2721,6 @@ impl Agent {
                     "conversation_config_override": {"agent": {"prompt": {"prompt": true}}, "tts": {"voice_id": true}}
                 }},
                 "conversation_config": {"agent": {"language": "de", "prompt": {
-                    "llm": "gemini-2.5-flash-lite", "backup_llm_config": {"type": "disabled"}, "thinking_budget": 0,
                     "tools": [{"type": "client", "name": "send_to_yard", "expects_response": true,
                         "response_timeout_secs": 20,
                         "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]

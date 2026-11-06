@@ -262,14 +262,6 @@ fn configuration(config: &Value, tools: &[Value], voice_override: bool) -> Resul
     {
         return Err("Require Agent authentication and permit the prompt override (and voice override when selected).".into());
     }
-    if prompt["llm"] != "gemini-2.5-flash-lite"
-        || prompt["backup_llm_config"]["type"] != "disabled"
-        || prompt["thinking_budget"].as_u64().is_some_and(|n| n != 0)
-    {
-        return Err(
-            "Configure Gemini 2.5 Flash-Lite with thinking off and backup models disabled.".into(),
-        );
-    }
     if prompt["knowledge_base"]
         .as_array()
         .is_some_and(|a| !a.is_empty())
@@ -1104,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn config_verifies_tool_wait_model_and_override_permissions_before_signing() {
+    fn config_verifies_tool_wait_and_override_permissions_before_signing() {
         let agent = Agent::new();
         let config = agent.config.lock().unwrap().clone();
         let tools = config["conversation_config"]["agent"]["prompt"]["tools"]
@@ -1131,9 +1123,14 @@ mod tests {
             *bad[0].pointer_mut(path).unwrap() = value;
             assert!(configuration(&config, &bad, true).is_err());
         }
-        let mut bad = config.clone();
-        bad["conversation_config"]["agent"]["prompt"]["llm"] = json!("expensive-fallback");
-        assert!(configuration(&bad, &tools, true).is_err());
+        for prompt in [
+            json!({"llm": "another-model", "backup_llm_config": {"type": "default"}, "thinking_budget": 1024}),
+            json!({}),
+        ] {
+            let mut compatible = config.clone();
+            compatible["conversation_config"]["agent"]["prompt"] = prompt;
+            assert!(configuration(&compatible, &tools, true).is_ok());
+        }
     }
 
     #[test]

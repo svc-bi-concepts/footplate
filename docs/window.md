@@ -395,6 +395,8 @@ folder. A change is drawn at once and kept for the next start:
   Send once the line holds words or a file; and Stop while a session
   stands, whatever the line holds, which a second tap ends without
   sending what you typed (it stays in the line, and Enter sends it).
+  With ElevenLabs selected and no conversation open, Voice in the rail opens
+  yardmaster-chris and starts a session there.
   While a session stands, quiet words beside the button say what is going
   on (`starting…`, `listening`, `yardmaster is working`, `speaking`), a
   line under the head shows what you have said that no request has taken
@@ -650,9 +652,6 @@ still need commissioning; tests use a fake provider, not a model.
 - Require authentication. Choose a German/English-capable voice; enable German
   and English language switching and interruptions. Try Swiss German during
   commissioning; it is not required.
-- Start with Gemini 2.5 Flash-Lite if your workspace offers it, thinking off
-  where supported; disable unapproved backup-model cascading. Availability and
-  bilingual tool-call quality still need a live check later.
 - Define one client tool, `send_to_yard`, with required string `text` and
   **Wait for response** enabled and a **20-second response timeout**. The
   desktop implements this tool; use no webhook, workflow, other action tools,
