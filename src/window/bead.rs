@@ -267,6 +267,12 @@ impl Footplate {
             self.change(cx, |m| {
                 m.select(Selected::Conversation("yardmaster-chris".into()))
             });
+            if self.open().is_none() {
+                return self.notice(
+                    "Voice is unavailable: yardmaster-chris is not in this yard. Open a conversation and try again.".into(),
+                    cx,
+                );
+            }
         }
         let Some((with, _)) = self.open() else {
             return;

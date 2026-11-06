@@ -12294,6 +12294,46 @@ yardr.dev
         drop(socket);
     }
 
+    // The default routing contract requires yardmaster-chris; a yard that
+    // lacks that crew member must explain why Voice cannot start, rather
+    // than silently doing nothing or sending to another conversation.
+    #[gpui::test]
+    fn agent_missing_default_conversation_reports_unavailable(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            voice_provider: voice::Provider::ElevenLabs,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        view.update(cx, |v, cx| {
+            v.means.agent = Rc::new(|_, _, _, _, _, _, _| {
+                panic!("a missing conversation must not start the provider")
+            });
+            v.change(cx, |m| m.select(Selected::Yard));
+        });
+        click_on(cx, "rail voice");
+        assert_eq!(
+            notice(&view, cx),
+            "Voice is unavailable: yardmaster-chris is not in this yard. Open a conversation and try again."
+        );
+        assert!(!voice_stands(&view, cx));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned()),
+            Some(Selected::Yard)
+        );
+        assert!(yard.asked("Mail").is_empty());
+    }
+
     #[gpui::test]
     fn agent_default_conversation_idle_wait_and_all_stop_paths_close_audio(
         cx: &mut TestAppContext,
