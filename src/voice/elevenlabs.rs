@@ -59,9 +59,6 @@ fn error_code(event: &Value) -> &str {
     event
         .pointer("/error_event/error_name")
         .or_else(|| event.pointer("/detail/status"))
-        .or_else(|| event.pointer("/error/code"))
-        .or_else(|| event.pointer("/error_type"))
-        .or_else(|| event.pointer("/code"))
         .and_then(Value::as_str)
         .unwrap_or("")
 }
@@ -1097,6 +1094,27 @@ mod tests {
             meter(Duration::from_millis(59_999)),
             "0:59 connected · call ~$0.08 · LLM extra"
         );
+    }
+
+    #[test]
+    fn agent_contract_refusal_envelopes() {
+        for event in [
+            json!({"detail": {"status": "quota_exceeded"}}),
+            json!({"error_event": {"error_name": "quota_exceeded"}}),
+        ] {
+            assert!(refusal(0, error_code(&event), false).contains("quota exhausted"));
+        }
+        for event in [
+            json!({"error": {"code": "quota_exceeded"}}),
+            json!({"error_type": "quota_exceeded"}),
+            json!({"code": "quota_exceeded"}),
+            json!({"detail": {"message": "SECRET"}}),
+            json!({"error_event": {"error_name": "SECRET"}}),
+        ] {
+            let why = refusal(0, error_code(&event), false);
+            assert!(why.contains("request refused"), "{why}");
+            assert!(!why.contains("quota exhausted") && !why.contains("SECRET"));
+        }
     }
 
     #[test]

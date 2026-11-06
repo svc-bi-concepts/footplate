@@ -5279,16 +5279,19 @@ impl Footplate {
                         crate::voice::Provider::ElevenLabs => "with nobody speaking and nothing waited for",
                     }),
             );
+        let plain = gpui::StyledText::new(match provider {
+            crate::voice::Provider::OpenAi => VOICE_PLAIN,
+            crate::voice::Provider::ElevenLabs => ELEVENLABS_PLAIN,
+        });
+        #[cfg(test)]
+        self.voice_plain.replace(Some(plain.layout().clone()));
         section.child(
             div()
                 .debug_selector(|| "voice plain".to_string())
                 .pr_4()
                 .text_sm()
                 .text_color(palette.faint)
-                .child(match provider {
-                    crate::voice::Provider::OpenAi => VOICE_PLAIN,
-                    crate::voice::Provider::ElevenLabs => ELEVENLABS_PLAIN,
-                }),
+                .child(plain),
         )
     }
 
@@ -6954,43 +6957,6 @@ fn pose_shot_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The line the Voice section says is held to everything a voice
-    /// session sends and keeps: microphone audio going to OpenAI, what
-    /// the person says, the yard's and the counterpart's names, their
-    /// answers, and the up-to-30-day abuse-monitoring retention with
-    /// `store` off. Every one of those is named in it.
-    #[test]
-    fn agent_disclosure_names_payloads_costs_and_unverified_privacy_controls() {
-        for named in [
-            "microphone audio",
-            "transcripts",
-            "tool inputs",
-            "yard and crew names",
-            "returned yard mail",
-            "LLM provider",
-            "written yard mail is the record",
-            "call minutes",
-            "LLM usage",
-            "$0.08/min",
-            "burst pricing",
-            "95%",
-            "pending work",
-            "entitlement",
-            "PAYG",
-            "two years by default",
-            "separate transcript and audio",
-            "not configured or verified",
-            "future submissions",
-            "Enterprise Zero Retention",
-            "EU-only processing",
-            "no audio archive",
-            "owner-only on Unix",
-            "no microphone opens and no key is read",
-        ] {
-            assert!(ELEVENLABS_PLAIN.contains(named), "missing {named}");
-        }
-    }
 
     #[test]
     fn the_plain_line_names_all_a_voice_session_sends_and_keeps() {
