@@ -736,7 +736,17 @@ including late replies after a session ends.
 
 The session prompt is supplied by `hello` in
 [`src/voice/elevenlabs.rs`](../src/voice/elevenlabs.rs); no prompt template or
-session variables need to be copied into the hosted Agent.
+session variables need to be copied into the hosted Agent. In both German and
+English, it asks for one or two short sentences, with no preamble, repeated
+question or closing offers. Arriving yard mail gets a one-sentence gist (who,
+what and what is needed), with details only on request. IDs, hashes, paths and
+URLs stay in written mail unless asked for aloud. A `send_to_yard` submission
+gets only a few words of confirmation, such as “sent to <crew>”; this does not
+claim a yard reply or completion. The evidence and approval rules still apply.
+
+Optionally adjust the Agent's maximum output tokens and its first message in
+your ElevenLabs workspace for shorter speech. Footplate does not configure
+those settings.
 
 Each `send_to_yard(text)` call submits that text as ordinary written mail to
 the captured conversation, using the same sender as the composer. It is not
