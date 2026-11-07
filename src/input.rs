@@ -10,7 +10,7 @@
 //! nothing out.
 
 #[cfg(target_os = "macos")]
-mod clipboard;
+pub(crate) mod clipboard;
 
 use std::ops::Range;
 
@@ -108,6 +108,7 @@ pub struct Line {
     /// nothing is copied or cut out of and the input method is told
     /// none of.
     shown: bool,
+    images: bool,
 }
 
 /// What a masked line draws in place of each character.
@@ -115,7 +116,12 @@ const MARK: &str = "\u{2022}";
 
 /// An image was pasted into the line. The line holds text, so it is the
 /// window's to attach.
-pub struct Pasted(pub Image);
+#[derive(Clone)]
+pub enum Pasted {
+    Image(Image),
+    #[cfg(target_os = "macos")]
+    Native(clipboard::Content),
+}
 
 /// Backspace was pressed in the empty line: there is no text left to take
 /// from, and the window may hold something before the text.
@@ -142,6 +148,14 @@ impl Line {
             is_selecting: false,
             masked: false,
             shown: false,
+            images: false,
+        }
+    }
+
+    pub fn composer(cx: &mut Context<Self>) -> Self {
+        Self {
+            images: true,
+            ..Self::new(cx)
         }
     }
 
@@ -406,24 +420,24 @@ impl Line {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        // gpui prefers a string even when the pasteboard also has an
-        // image, and does not read Finder's file URLs. Tests use gpui's
-        // own clipboard, never the person's general pasteboard.
         #[cfg(all(target_os = "macos", not(test)))]
-        if let Some(image) = clipboard::image() {
-            cx.emit(Pasted(image));
+        if let Some(content) = clipboard::image(self.images) {
+            cx.emit(Pasted::Native(content));
             return;
         }
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
-        if let Some(text) = item.text() {
+        let text = item.text();
+        if self.images
+            && let Some(image) = item.into_entries().find_map(|entry| match entry {
+                ClipboardEntry::Image(image) => Some(image),
+                ClipboardEntry::String(_) => None,
+            })
+        {
+            cx.emit(Pasted::Image(image));
+        } else if let Some(text) = text {
             self.replace_text_in_range(None, &text, window, cx);
-        } else if let Some(image) = item.into_entries().find_map(|entry| match entry {
-            ClipboardEntry::Image(image) => Some(image),
-            ClipboardEntry::String(_) => None,
-        }) {
-            cx.emit(Pasted(image));
         }
     }
 
@@ -1472,12 +1486,18 @@ mod tests {
     #[gpui::test]
     fn pasting_an_image_emits_it_and_keeps_the_text(cx: &mut TestAppContext) {
         let (line, cx) = opened(cx);
+        line.update(cx, |line, _| line.images = true);
         let sent = Rc::new(Cell::new(0));
         let count = sent.clone();
         let bytes = include_bytes!("fixtures/shot-page.png");
         cx.update(|_, cx| {
             cx.subscribe(&line, move |_, pasted: &Pasted, _| {
-                assert_eq!(pasted.0.bytes(), bytes);
+                let image = match pasted {
+                    Pasted::Image(image) => image,
+                    #[cfg(target_os = "macos")]
+                    Pasted::Native(_) => panic!("expected gpui image"),
+                };
+                assert_eq!(image.bytes(), bytes);
                 count.set(count.get() + 1);
             })
             .detach();
@@ -1490,6 +1510,27 @@ mod tests {
         cx.simulate_keystrokes("secondary-v");
         assert_eq!(sent.get(), 1);
         assert_eq!(text(&line, cx), "Like this");
+    }
+
+    #[gpui::test]
+    fn text_fields_do_not_emit_image_attachments(cx: &mut TestAppContext) {
+        let (line, cx) = opened(cx);
+        let image = Image::from_bytes(
+            gpui::ImageFormat::Png,
+            include_bytes!("fixtures/shot-page.png").to_vec(),
+        );
+        cx.update(|_, cx| {
+            cx.subscribe(&line, |_, _: &Pasted, _| {
+                panic!("text field emitted an attachment")
+            })
+            .detach();
+        });
+        cx.write_to_clipboard(ClipboardItem::new_image(&image));
+        cx.simulate_keystrokes("secondary-v");
+        assert_eq!(text(&line, cx), "");
+        cx.write_to_clipboard(ClipboardItem::new_string("screenshot.png".into()));
+        cx.simulate_keystrokes("secondary-v");
+        assert_eq!(text(&line, cx), "screenshot.png");
     }
 
     #[gpui::test]

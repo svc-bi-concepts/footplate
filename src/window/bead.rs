@@ -947,9 +947,38 @@ impl Footplate {
     /// Attaches a file that was pasted to the draft of the open
     /// conversation: Enter sends it. One over the yard's cap or past its
     /// count is marked as soon as the yard said them.
-    pub(crate) fn paste(&mut self, image: &Image, cx: &mut Context<Self>) {
+    pub(crate) fn paste(&mut self, pasted: &crate::input::Pasted, cx: &mut Context<Self>) {
         let Some((with, _)) = self.open() else {
             return;
+        };
+        let image = match pasted {
+            crate::input::Pasted::Image(image) => image,
+            #[cfg(target_os = "macos")]
+            crate::input::Pasted::Native(content) => {
+                let content = content.clone();
+                let existing = self.drafts.attachments(&with).len();
+                self.ask(
+                    cx,
+                    move |client, _| {
+                        let settings = client.settings().ok();
+                        let cap = settings
+                            .as_ref()
+                            .map(|s| s.blob_cap())
+                            .unwrap_or(api::BLOB_MAX_BYTES);
+                        let max = settings
+                            .as_ref()
+                            .map(|s| s.files_cap())
+                            .unwrap_or(api::FILES_MAX);
+                        content.read(cap, max, existing)
+                    },
+                    move |this, found, cx| {
+                        if let Some(found) = found {
+                            this.attach(&with, found, cx);
+                        }
+                    },
+                );
+                return;
+            }
         };
         let found = draft::pasted(image.bytes().to_vec());
         let bytes = found.bytes.clone();
