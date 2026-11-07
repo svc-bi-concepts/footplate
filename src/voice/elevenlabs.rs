@@ -280,9 +280,6 @@ fn connect(
     let prompt = &config["conversation_config"]["agent"]["prompt"];
     let mut tools = prompt["tools"].as_array().cloned().unwrap_or_default();
     if let Some(ids) = prompt["tool_ids"].as_array() {
-        if ids.len() > 1 {
-            return Err("Configure only the send_to_yard client tool.".into());
-        }
         for id in ids {
             let id = id
                 .as_str()
@@ -333,19 +330,57 @@ fn configuration(config: &Value, tools: &[Value], voice_override: bool) -> Resul
     {
         return Err("Require Agent authentication and permit the prompt override (and voice override when selected).".into());
     }
-    if config["workflow"]["nodes"]
-        .as_object()
-        .is_some_and(|a| !a.is_empty())
+    let workflow = &config["workflow"];
+    let empty = |v: &Value| v.is_null() || v.as_object().is_some_and(|a| a.is_empty());
+    let start_only = workflow["nodes"].as_object().is_some_and(|nodes| {
+        nodes.len() == 1 && nodes.values().all(|node| node["type"] == "start")
+    });
+    if !(workflow.is_null() || workflow.is_object())
+        || !(empty(&workflow["nodes"]) || start_only)
+        || !empty(&workflow["edges"])
+        || !empty(&workflow["subgraphs"])
         || platform["workspace_overrides"]["conversation_initiation_client_data_webhook"]
             .is_object()
         || platform["workspace_overrides"]["webhooks"]["post_call_webhook_id"].is_string()
     {
         return Err("Use an Agent without a workflow or webhooks.".into());
     }
-    if tools.len() != 1 {
+    let language_detection = |tool: &Value| {
+        tool["type"] == "system"
+            && tool["name"] == "language_detection"
+            && tool["params"]["system_tool_type"] == "language_detection"
+    };
+    let built_in = &config["conversation_config"]["agent"]["prompt"]["built_in_tools"];
+    if !built_in.is_null()
+        && !built_in.as_object().is_some_and(|tools| {
+            tools.iter().all(|(name, tool)| {
+                tool.is_null() || (name == "language_detection" && language_detection(tool))
+            })
+        })
+    {
+        return Err("Use only the language_detection built-in system tool.".into());
+    }
+    // The agent's inline tools mirror tool_ids. Only identical client
+    // configurations can stand for the same tool in both representations.
+    let mut clients = BTreeMap::new();
+    for tool in tools {
+        match tool["type"].as_str() {
+            Some("client") => {
+                let name = tool["name"].as_str().ok_or("Client tool has no name.")?;
+                if clients.insert(name, tool).is_some_and(|old| old != tool) {
+                    return Err("Conflicting client tool configurations.".into());
+                }
+            }
+            Some("system") if language_detection(tool) => {}
+            _ => {
+                return Err("Use only send_to_yard and the language_detection system tool.".into());
+            }
+        }
+    }
+    if clients.len() != 1 {
         return Err("Configure exactly one send_to_yard client tool.".into());
     }
-    let t = &tools[0];
+    let t = clients.values().next().unwrap();
     let params = &t["parameters"];
     if t["type"] != "client"
         || t["name"] != "send_to_yard"
@@ -904,6 +939,8 @@ pub(crate) mod stand_in {
                 json!({"error": "fake-eleven-key", "signed_url": socket})
             } else if signed {
                 json!({"signed_url": socket})
+            } else if line.starts_with("GET /v1/convai/tools/") {
+                json!({"tool_config": agent.config.lock().unwrap()["conversation_config"]["agent"]["prompt"]["tools"][0]})
             } else {
                 agent.config.lock().unwrap().clone()
             }
@@ -1430,6 +1467,186 @@ mod tests {
             );
             assert!(told.try_recv().is_err());
             assert_eq!(agent.heads.lock().unwrap().len(), requests);
+        }
+    }
+
+    // The default workflow and mirrored tools returned for a real Agent.
+    // No account IDs, keys or signed addresses are needed by this fixture.
+    fn real_agent_config() -> Value {
+        let agent = Agent::new();
+        let mut config = agent.config.lock().unwrap().clone();
+        config["workflow"] = json!({
+            "edges": {},
+            "nodes": {"start_node": {"type": "start", "position": {"x": 0, "y": 0},
+                "edge_order": [], "parent_subgraph_id": null}},
+            "subgraphs": {}, "prevent_subagent_loops": true
+        });
+        config["platform_settings"]["workspace_overrides"] = json!({
+            "conversation_initiation_client_data_webhook": null,
+            "webhooks": {"post_call_webhook_id": null}
+        });
+        let prompt = &mut config["conversation_config"]["agent"]["prompt"];
+        prompt["tools"][0]["parameters"]["description"] = json!("Yard request");
+        prompt["tools"][0]["parameters"]["properties"]["text"] = json!({
+            "type": "string", "description": "Request text", "is_omitted": false,
+            "dynamic_variable": "", "constant_value": ""
+        });
+        let language = json!({"type": "system", "name": "language_detection",
+            "params": {"system_tool_type": "language_detection"}});
+        prompt["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(language.clone());
+        prompt["built_in_tools"] = json!({"language_detection": language});
+        prompt["tool_ids"] = json!(["tool_test"]);
+        config
+    }
+
+    #[test]
+    fn real_agent_shape_passes_configuration_and_authenticated_start() {
+        let config = real_agent_config();
+        let mut tools = config["conversation_config"]["agent"]["prompt"]["tools"]
+            .as_array()
+            .unwrap()
+            .clone();
+        // GET /tools/{id} returns the same tool_config as prompt.tools.
+        tools.push(tools[0].clone());
+        assert!(configuration(&config, &tools, true).is_ok());
+        let agent = Arc::new(Agent::new());
+        *agent.config.lock().unwrap() = config;
+        let fake = SocketAgent::start(agent.clone());
+        let (voice, _) = started(&fake);
+        let heads = agent.heads.lock().unwrap().clone();
+        assert_eq!(heads.len(), 4);
+        assert!(heads[1].starts_with("GET /v1/convai/tools/tool_test "));
+        assert!(heads[2].contains("get-signed-url"));
+        voice.stop();
+        assert!(agent.errors.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn real_agent_shape_checks_every_enabled_built_in_before_signing() {
+        let config = real_agent_config();
+        let tools = config["conversation_config"]["agent"]["prompt"]["tools"]
+            .as_array()
+            .unwrap();
+        let language = json!({"type": "system", "name": "language_detection",
+            "params": {"system_tool_type": "language_detection"}});
+        for built_in in [
+            Value::Null,
+            json!({}),
+            json!({"end_call": null, "language_detection": language}),
+        ] {
+            let mut compatible = config.clone();
+            compatible["conversation_config"]["agent"]["prompt"]["built_in_tools"] = built_in;
+            assert!(configuration(&compatible, tools, true).is_ok());
+        }
+        for built_in in [
+            json!({"language_detection": language, "end_call": {
+                "type": "system", "name": "end_call",
+                "params": {"system_tool_type": "end_call"}
+            }}),
+            json!({"end_call": language}),
+            json!({"language_detection": {"type": "system", "name": "end_call",
+                "params": {"system_tool_type": "language_detection"}}}),
+            json!({"language_detection": {"type": "system", "name": "language_detection",
+                "params": {"system_tool_type": "end_call"}}}),
+            json!({"language_detection": tools[0]}),
+            json!({"language_detection": {}}),
+            json!([]),
+        ] {
+            let mut bad = config.clone();
+            bad["conversation_config"]["agent"]["prompt"]["built_in_tools"] = built_in.clone();
+            assert!(configuration(&bad, tools, true).is_err(), "{built_in}");
+            let agent = Arc::new(Agent::new());
+            *agent.config.lock().unwrap() = bad;
+            let fake = SocketAgent::start(agent.clone());
+            let (tell, told) = mpsc::channel();
+            let Start::On(voice) = fake.start_voice(true, "south", "chris", tell) else {
+                panic!()
+            };
+            assert!(matches!(
+                told.recv_timeout(Duration::from_secs(4)).unwrap(),
+                Update::Refused(_)
+            ));
+            voice.stop();
+            let heads = agent.heads.lock().unwrap();
+            assert_eq!(heads.len(), 2);
+            assert!(heads[1].starts_with("GET /v1/convai/tools/tool_test "));
+        }
+    }
+
+    #[test]
+    fn real_agent_shape_refuses_extra_tools_and_conflicting_mirrors() {
+        let config = real_agent_config();
+        let tools = config["conversation_config"]["agent"]["prompt"]["tools"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let mut second = tools[0].clone();
+        second["name"] = json!("another_client");
+        let mut conflict = tools[0].clone();
+        conflict["response_timeout_secs"] = json!(60);
+        for extra in [
+            second,
+            conflict,
+            json!({"type": "webhook", "name": "send_to_yard"}),
+            json!({"type": "system", "name": "end_call", "params": {"system_tool_type": "end_call"}}),
+            json!({"type": "system", "name": "other", "params": {"system_tool_type": "other"}}),
+            json!({"type": "system", "name": "language_detection", "params": {"system_tool_type": "end_call"}}),
+            json!({"type": "unknown", "name": "send_to_yard"}),
+        ] {
+            let mut bad = tools.clone();
+            bad.push(extra.clone());
+            assert!(configuration(&config, &bad, true).is_err(), "{extra}");
+        }
+        assert!(configuration(&config, &tools[1..], true).is_err());
+    }
+
+    #[test]
+    fn real_agent_shape_accepts_only_empty_or_start_only_workflows() {
+        let config = real_agent_config();
+        let tools = config["conversation_config"]["agent"]["prompt"]["tools"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for workflow in [
+            Value::Null,
+            json!({}),
+            json!({"nodes": {}, "edges": {}, "subgraphs": {}}),
+        ] {
+            let mut compatible = config.clone();
+            compatible["workflow"] = workflow;
+            assert!(configuration(&compatible, &tools, true).is_ok());
+        }
+        for (path, value) in [
+            ("/workflow/nodes/second", json!({"type": "end"})),
+            ("/workflow/nodes/start_node/type", json!("override_agent")),
+            (
+                "/workflow/edges",
+                json!({"edge": {"source": "start_node", "target": "start_node"}}),
+            ),
+            ("/workflow/subgraphs", json!({"subgraph": {}})),
+            ("/workflow/nodes", json!([])),
+            ("/workflow/edges", json!([])),
+            ("/workflow", json!("invalid")),
+            (
+                "/platform_settings/workspace_overrides/conversation_initiation_client_data_webhook",
+                json!({"url": "https://example.invalid"}),
+            ),
+            (
+                "/platform_settings/workspace_overrides/webhooks/post_call_webhook_id",
+                json!("webhook_test"),
+            ),
+        ] {
+            let mut bad = config.clone();
+            // The extra node is the only path that does not yet exist.
+            if path == "/workflow/nodes/second" {
+                bad["workflow"]["nodes"]["second"] = value;
+            } else {
+                *bad.pointer_mut(path).unwrap() = value;
+            }
+            assert!(configuration(&bad, &tools, true).is_err(), "{path}");
         }
     }
 
