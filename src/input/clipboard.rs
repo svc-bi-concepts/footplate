@@ -51,17 +51,10 @@ pub(crate) enum Content {
 }
 
 impl Content {
-    pub(crate) fn read(
-        self,
-        cap: Option<u64>,
-        max: Option<u64>,
-        existing: usize,
-    ) -> Option<crate::draft::Found> {
+    pub(crate) fn read(self, cap: Option<u64>) -> Option<crate::draft::Found> {
         let mut found = match self {
             Self::Bytes(bytes) => crate::draft::pasted(bytes),
-            Self::File(path) => {
-                crate::draft::dropped(&path, cap, max.unwrap_or(u64::MAX), existing).pop()?
-            }
+            Self::File(path) => crate::draft::dropped(&path, cap, u64::MAX, 0).pop()?,
         };
         if found.refused.is_none() {
             let image = from_bytes(std::mem::take(&mut found.bytes))?;
@@ -69,12 +62,6 @@ impl Content {
             found.size = found.bytes.len() as u64;
             found.refused = cap
                 .and_then(|cap| crate::model::over_cap_for(&found.bytes, found.bytes.len(), cap));
-        }
-        if found.refused.is_none()
-            && let Some(max) = max
-            && existing as u64 >= max
-        {
-            found.refused = Some(crate::draft::one_too_many(&found.name, existing, max));
         }
         Some(found)
     }
@@ -136,11 +123,7 @@ mod tests {
         assert_eq!(
             read(&board, true)
                 .unwrap()
-                .read(
-                    Some(crate::api::BLOB_MAX_BYTES),
-                    Some(crate::api::FILES_MAX),
-                    0
-                )
+                .read(Some(crate::api::BLOB_MAX_BYTES))
                 .unwrap()
                 .bytes,
             png
@@ -162,11 +145,7 @@ mod tests {
         let board = board("public.tiff", &tiff.to_vec());
         let pasted = read(&board, true)
             .unwrap()
-            .read(
-                Some(crate::api::BLOB_MAX_BYTES),
-                Some(crate::api::FILES_MAX),
-                0,
-            )
+            .read(Some(crate::api::BLOB_MAX_BYTES))
             .unwrap();
         assert_eq!(crate::model::image_type(&pasted.bytes), Some("image/png"));
         let decoded = image::load_from_memory(&pasted.bytes).unwrap();
@@ -193,11 +172,7 @@ mod tests {
         assert_eq!(
             read(&board, true)
                 .unwrap()
-                .read(
-                    Some(crate::api::BLOB_MAX_BYTES),
-                    Some(crate::api::FILES_MAX),
-                    0
-                )
+                .read(Some(crate::api::BLOB_MAX_BYTES))
                 .unwrap()
                 .bytes,
             png
@@ -215,9 +190,7 @@ mod tests {
         let path = dir.path().join("large.png");
         let png = include_bytes!("../fixtures/shot-page.png");
         std::fs::write(&path, png).unwrap();
-        let found = Content::File(path)
-            .read(Some(1), Some(crate::api::FILES_MAX), 0)
-            .unwrap();
+        let found = Content::File(path).read(Some(1)).unwrap();
         assert!(found.bytes.is_empty());
         assert_eq!(found.size, png.len() as u64);
         assert!(found.refused.unwrap().contains("at most"));
@@ -231,9 +204,7 @@ mod tests {
         let path = dir.path().join("large.png");
         std::fs::write(&path, &png).unwrap();
         for content in [Content::Bytes(png.clone()), Content::File(path)] {
-            let found = content
-                .read(None, None, crate::api::FILES_MAX as usize)
-                .unwrap();
+            let found = content.read(None).unwrap();
             assert_eq!(found.refused, None);
             assert_eq!(found.bytes, png);
         }

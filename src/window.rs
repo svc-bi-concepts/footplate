@@ -2089,6 +2089,10 @@ mod tests {
         wait(cx, "the conversation", |cx| {
             view.read_with(cx, |v, _| v.open().is_some())
         });
+        yard.answer(
+            "Settings",
+            r#"{"result": {"operator": "jo", "files_max": "1"}}"#,
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("screenshot.png");
         std::fs::write(&path, png()).unwrap();
@@ -2097,10 +2101,15 @@ mod tests {
             (1, Content::File(path), "screenshot.png"),
         ] {
             cx.simulate_input("Like this.");
+            let first = view.update(cx, |v, cx| {
+                let (with, _) = v.open().unwrap();
+                v.attach(&with, crate::draft::pasted(png()), cx)
+            });
             view.update(cx, |v, cx| {
                 v.line.update(cx, |_, cx| cx.emit(Pasted::Native(content)));
             });
-            assert_eq!(attached(&view, cx).len(), 1);
+            assert_eq!(attached(&view, cx).len(), 2);
+            view.update(cx, |v, cx| v.remove(first, cx));
             view.update(cx, |v, cx| v.send(cx));
             assert_eq!(yard.asked("Mail").len(), index);
             assert_eq!(typed(&view, cx), "Like this.");

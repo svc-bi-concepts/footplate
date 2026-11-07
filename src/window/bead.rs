@@ -956,7 +956,6 @@ impl Footplate {
             #[cfg(target_os = "macos")]
             crate::input::Pasted::Native(content) => {
                 let content = content.clone();
-                let existing = self.drafts.attachments(&with).len();
                 let mut waiting = draft::pasted(Vec::new());
                 waiting.refused = Some("the pasted image is still being read".into());
                 let id = self.attach(&with, waiting, cx);
@@ -966,9 +965,9 @@ impl Footplate {
                         let settings = client.settings().ok();
                         let cap = settings.as_ref().map(|s| s.blob_cap());
                         let max = settings.as_ref().map(|s| s.files_cap());
-                        content.read(cap, max, existing)
+                        (content.read(cap), max)
                     },
-                    move |this, found, cx| {
+                    move |this, (found, max), cx| {
                         let found = found.unwrap_or_else(|| {
                             let mut found = draft::pasted(Vec::new());
                             found.refused = Some("the pasted image could not be read".into());
@@ -977,7 +976,7 @@ impl Footplate {
                         let image = model::image_type(&found.bytes)
                             .and_then(ImageFormat::from_mime_type)
                             .map(|format| Arc::new(Image::from_bytes(format, found.bytes.clone())));
-                        if this.drafts.replace(id, found) {
+                        if this.drafts.replace(id, found, max) {
                             if let Some(image) = image {
                                 this.thumbs.insert(id, image);
                             }
