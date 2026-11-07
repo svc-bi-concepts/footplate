@@ -1129,6 +1129,9 @@ pub(crate) mod stand_in {
                         let (status, value) =
                             replies.next().expect("unexpected diagnostic request");
                         if value["close"] == true {
+                            if replies.len() == 0 {
+                                break;
+                            }
                             continue;
                         }
                         let body = value["raw"]
@@ -1136,6 +1139,9 @@ pub(crate) mod stand_in {
                             .map(str::to_string)
                             .unwrap_or_else(|| value.to_string());
                         write!(stream, "HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                        if replies.len() == 0 {
+                            break;
+                        }
                     }
                 }
             });
