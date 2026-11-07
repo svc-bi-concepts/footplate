@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::model;
 
-/// What a file from the clipboard is called: it has no name of its own.
+/// What an unnamed clipboard image is called; Finder files keep their names.
 const PASTED: &str = "what was pasted";
 
 /// Something pasted or dropped, before it is attached.
