@@ -2733,17 +2733,20 @@ fn kratos_errors(bytes: &[u8]) -> Vec<String> {
 /// a redirect is such a status. A file longer than `most` bytes is not
 /// read to its end.
 pub fn read(address: &Address, path: &str, most: u64) -> Result<(u16, Vec<u8>)> {
-    read_with_headers(address, path, most, &[], |_| {})
+    read_with_headers(address, path, most, &[], |status| status == 200, |_| {})
 }
 
 /// A bounded site read with caller-owned authentication. Redirects remain
 /// statuses, so a credential is never forwarded to another host. `connected`
-/// lets the session cancel a read when the person hangs up.
+/// lets the session cancel a read when the person hangs up. `read_body`
+/// selects the statuses whose bounded body the caller needs; authenticated
+/// diagnostics classify known error codes without displaying provider prose.
 pub(crate) fn read_with_headers(
     address: &Address,
     path: &str,
     most: u64,
     headers: &[(&str, &str)],
+    read_body: impl FnOnce(u16) -> bool,
     connected: impl FnOnce(EventStop),
 ) -> Result<(u16, Vec<u8>)> {
     let mut extra = String::new();
@@ -2766,7 +2769,7 @@ pub(crate) fn read_with_headers(
     )?;
     conn.flush()?;
     let (status, reply) = respond(conn)?;
-    if status != 200 {
+    if !read_body(status) {
         return Ok((status, Vec::new()));
     }
     let mut bytes = Vec::new();

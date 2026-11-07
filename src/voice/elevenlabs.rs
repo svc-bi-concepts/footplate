@@ -238,7 +238,7 @@ fn gated_start(
 enum SiteError {
     Network,
     Unreadable,
-    Status(u16),
+    Status(u16, &'static str),
 }
 
 impl SiteError {
@@ -246,14 +246,21 @@ impl SiteError {
         match self {
             Self::Network => "network error".into(),
             Self::Unreadable => "unreadable response".into(),
-            Self::Status(status) => {
-                let reason = match status {
-                    401 => "key rejected",
-                    402 => "quota exhausted",
-                    403 => "access forbidden",
-                    404 => return format!("{item} not found (HTTP 404)"),
-                    429 => "quota or rate limit reached",
-                    _ => "request refused",
+            Self::Status(status, code) => {
+                let reason = match *code {
+                    "quota_exceeded" => "quota exhausted",
+                    "rate_limit_exceeded" => "quota or rate limit reached",
+                    "invalid_api_key" => "key rejected",
+                    "agent_not_found" => "agent not found",
+                    "voice_not_found" => "voice not found",
+                    _ => match status {
+                        401 => "key rejected",
+                        402 => "quota exhausted",
+                        403 => "access forbidden",
+                        404 => return format!("{item} not found (HTTP 404)"),
+                        429 => "quota or rate limit reached",
+                        _ => "request refused",
+                    },
                 };
                 format!("{reason} (HTTP {status})")
             }
@@ -271,14 +278,34 @@ fn site_read(
         return Err(SiteError::Network);
     }
     let site = crate::api::Address::parse(&endpoint.site).map_err(|_| SiteError::Network)?;
-    let response =
-        crate::api::read_with_headers(&site, path, MOST, &[("xi-api-key", key)], |stop| {
-            control.follow_site(stop)
-        });
+    let response = crate::api::read_with_headers(
+        &site,
+        path,
+        MOST,
+        &[("xi-api-key", key)],
+        |_| true,
+        |stop| control.follow_site(stop),
+    );
     control.0.inner.lock().unwrap().site = None;
     let (status, body) = response.map_err(|_| SiteError::Network)?;
     if status != 200 {
-        return Err(SiteError::Status(status));
+        // Only canonical local strings survive this boundary. Error prose,
+        // unknown codes and headers may echo credentials and are discarded.
+        let event: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let code = match error_code(&event) {
+            "quota_exceeded" | "insufficient_credits" => "quota_exceeded",
+            "too_many_concurrent_requests"
+            | "rate_limit_exceeded"
+            | "rate_limited"
+            | "system_busy" => "rate_limit_exceeded",
+            "invalid_api_key" | "authentication_error" => "invalid_api_key",
+            "agent_not_found" => "agent_not_found",
+            "voice_not_found" => "voice_not_found",
+            "model_not_found" | "model_unavailable" | "permission_denied" => "permission_denied",
+            "token_expired" | "signed_url_expired" => "signed_url_expired",
+            _ => "",
+        };
+        return Err(SiteError::Status(status, code));
     }
     serde_json::from_slice(&body).map_err(|_| SiteError::Unreadable)
 }
@@ -290,7 +317,7 @@ fn site_json(
     key: &str,
 ) -> Result<Value, String> {
     site_read(endpoint, control, path, key).map_err(|error| match error {
-        SiteError::Status(status) => refusal(status, "", false),
+        SiteError::Status(status, code) => refusal(status, code, false),
         SiteError::Unreadable => "ElevenLabs returned an unreadable response".into(),
         SiteError::Network => "ElevenLabs network request failed. Voice stopped; start again explicitly. No automatic retry was made.".into(),
     })
@@ -1415,6 +1442,35 @@ mod tests {
                     assert_eq!(checks.voice, "not checked");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn diagnostic_recognizes_safe_provider_codes_before_http_status() {
+        // ElevenLabs' documented 400/401 envelope includes quota and
+        // missing-resource refusals as well as invalid keys.
+        for (item, code, expected) in [
+            (0, "quota_exceeded", "quota exhausted"),
+            (0, "insufficient_credits", "quota exhausted"),
+            (0, "invalid_api_key", "key rejected"),
+            (1, "agent_not_found", "agent not found"),
+            (2, "voice_not_found", "voice not found"),
+            (2, "rate_limit_exceeded", "rate limit"),
+        ] {
+            let mut replies = vec![
+                (200, json!({})),
+                (200, good_config()),
+                (200, json!({"voice_id": "voice_test"})),
+            ];
+            replies[item] = (
+                401,
+                json!({"detail": {"status": code, "message": "fake-check-secret SECRET"}}),
+            );
+            if item == 0 {
+                replies.truncate(1);
+            }
+            let (checks, _) = diagnostic(replies, "voice_test");
+            assert!([&checks.key, &checks.agent, &checks.voice][item].contains(expected));
         }
     }
 

@@ -11886,6 +11886,30 @@ yardr.dev
             );
             assert!(v.elevenlabs_test.is_none());
         });
+        for change_key in [false, true] {
+            view.update(cx, |v, cx| {
+                let generation = v.elevenlabs_generation;
+                v.elevenlabs_test = Some(("agent_test".into(), "voice_test".into(), None));
+                if change_key {
+                    v.voice_key
+                        .update(cx, |line, cx| line.set_text("fake-check-secret", cx));
+                    v.submit_voice_key(cx);
+                } else {
+                    v.pick_provider(Provider::OpenAi, cx);
+                    v.pick_provider(Provider::ElevenLabs, cx);
+                }
+                v.checked_elevenlabs(
+                    generation,
+                    crate::voice::elevenlabs::Checks {
+                        key: "old".into(),
+                        agent: "old".into(),
+                        voice: "old".into(),
+                    },
+                    cx,
+                );
+                assert!(v.elevenlabs_test.is_none());
+            });
+        }
         // A failed save is visible, and retrying unchanged in-memory IDs
         // succeeds once the store can be written again.
         std::fs::remove_file(&file).unwrap();

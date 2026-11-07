@@ -5327,7 +5327,12 @@ impl Footplate {
                             ),
                     )
                     .child(div().text_sm().text_color(palette.faint).child(format!(
-                        "saved {label}: {}",
+                        "{} {label}: {}",
+                        if self.unkept.is_some() {
+                            "unsaved"
+                        } else {
+                            "saved"
+                        },
                         if kept.is_empty() {
                             if label == "agent ID" {
                                 "not set".to_string()
