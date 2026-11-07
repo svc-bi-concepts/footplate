@@ -1111,6 +1111,7 @@ pub(crate) mod stand_in {
         thread: Option<JoinHandle<()>>,
         stopped: Arc<std::sync::atomic::AtomicBool>,
         pub(super) paths: Arc<Mutex<Vec<String>>>,
+        accepted: Mutex<mpsc::Receiver<()>>,
     }
 
     impl CheckSite {
@@ -1123,6 +1124,7 @@ pub(crate) mod stand_in {
                 socket: None,
             };
             let paths = Arc::new(Mutex::new(Vec::new()));
+            let (connected, accepted) = mpsc::channel();
             let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let thread = std::thread::spawn({
                 let stopped = stopped.clone();
@@ -1148,6 +1150,7 @@ pub(crate) mod stand_in {
                         stream
                             .set_write_timeout(Some(Duration::from_secs(15)))
                             .unwrap();
+                        let _ = connected.send(());
                         let mut bytes = Vec::new();
                         let mut byte = [0];
                         while !bytes.ends_with(b"\r\n\r\n") {
@@ -1200,6 +1203,7 @@ pub(crate) mod stand_in {
                 thread: Some(thread),
                 stopped,
                 paths,
+                accepted: Mutex::new(accepted),
             }
         }
         pub(crate) fn check(&self, settings: Option<&Path>, agent: &str, voice: &str) -> Checks {
@@ -1350,6 +1354,43 @@ pub(crate) mod stand_in {
 
     mod tests {
         use super::*;
+
+        #[test]
+        fn check_site_waits_for_a_complete_request() {
+            let body = json!({"voice_id": "voice_test"});
+            let site = CheckSite::new(vec![(200, body.clone())]);
+            let mut stream =
+                TcpStream::connect(site.endpoint.site.strip_prefix("http://").unwrap()).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            stream
+                .write_all(b"GET /v1/voices/voice_test HTTP/1.1\r\n")
+                .unwrap();
+            // Keep the header incomplete after accept, so a nonblocking read
+            // would abandon it instead of waiting for the remaining bytes.
+            site.accepted
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(15))
+                .unwrap();
+            let error = stream.read(&mut [0]).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ));
+            stream
+                .write_all(b"Host: localhost\r\nxi-api-key: fake-check-secret\r\n\r\n")
+                .unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 200 Response\r\n"));
+            assert!(response.ends_with(&format!("\r\n\r\n{body}")));
+            assert_eq!(*site.paths.lock().unwrap(), ["/v1/voices/voice_test"]);
+        }
 
         #[test]
         fn request_head_keeps_partial_bytes_across_transient_reads() {
