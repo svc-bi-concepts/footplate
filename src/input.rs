@@ -9,6 +9,9 @@
 //! Shown, it draws the text as typed, for a look, and still gives
 //! nothing out.
 
+#[cfg(target_os = "macos")]
+mod clipboard;
+
 use std::ops::Range;
 
 use gpui::{
@@ -403,6 +406,14 @@ impl Line {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        // gpui prefers a string even when the pasteboard also has an
+        // image, and does not read Finder's file URLs. Tests use gpui's
+        // own clipboard, never the person's general pasteboard.
+        #[cfg(all(target_os = "macos", not(test)))]
+        if let Some(image) = clipboard::image() {
+            cx.emit(Pasted(image));
+            return;
+        }
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
@@ -1456,6 +1467,29 @@ mod tests {
         cx.simulate_keystrokes("secondary-x");
         assert_eq!(text(&line, cx), "on");
         assert_eq!(shown(&line, cx).0, 1);
+    }
+
+    #[gpui::test]
+    fn pasting_an_image_emits_it_and_keeps_the_text(cx: &mut TestAppContext) {
+        let (line, cx) = opened(cx);
+        let sent = Rc::new(Cell::new(0));
+        let count = sent.clone();
+        let bytes = include_bytes!("fixtures/shot-page.png");
+        cx.update(|_, cx| {
+            cx.subscribe(&line, move |_, pasted: &Pasted, _| {
+                assert_eq!(pasted.0.bytes(), bytes);
+                count.set(count.get() + 1);
+            })
+            .detach();
+        });
+        cx.simulate_input("Like this");
+        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+            gpui::ImageFormat::Png,
+            bytes.to_vec(),
+        )));
+        cx.simulate_keystrokes("secondary-v");
+        assert_eq!(sent.get(), 1);
+        assert_eq!(text(&line, cx), "Like this");
     }
 
     #[gpui::test]
