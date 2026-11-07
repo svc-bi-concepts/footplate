@@ -777,8 +777,9 @@ not establish permission to sign.
 Start names a failed signing request **signed URL:** and a failed WebSocket
 connection **connect:**. After a successful Agent read, a signed-URL HTTP 401/403
 or a known missing-permission code reports that the key lacks ElevenAgents
-permission for signed URLs. Check that permission on the saved key. A refusal
-at **connect:** instead concerns the signed address or connection. Provider
+permission for signed URLs. Check that permission on the key Start uses (see
+[Voice settings](#settings) for key selection). A refusal at **connect:**
+concerns the signed address or connection. Provider
 messages and URLs remain withheld in both cases.
 
 The native app requests a signed URL with `xi-api-key`, then connects without

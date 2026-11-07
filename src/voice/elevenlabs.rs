@@ -1138,6 +1138,10 @@ pub(crate) mod stand_in {
                             }
                             Err(_) => break,
                         };
+                        // On macOS an accepted socket can inherit the listener's
+                        // nonblocking mode. Read the complete request even when
+                        // accept wins the race with the client's first write.
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(15)))
                             .unwrap();
