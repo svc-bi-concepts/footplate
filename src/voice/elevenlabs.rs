@@ -1098,10 +1098,10 @@ pub(crate) mod stand_in {
                             Err(_) => break,
                         };
                         stream
-                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .set_read_timeout(Some(Duration::from_secs(15)))
                             .unwrap();
                         stream
-                            .set_write_timeout(Some(Duration::from_secs(1)))
+                            .set_write_timeout(Some(Duration::from_secs(15)))
                             .unwrap();
                         let mut bytes = Vec::new();
                         let mut byte = [0];
