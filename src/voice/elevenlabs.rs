@@ -1106,9 +1106,14 @@ pub(crate) mod stand_in {
                         let mut bytes = Vec::new();
                         let mut byte = [0];
                         while !bytes.ends_with(b"\r\n\r\n") {
-                            stream.read_exact(&mut byte).unwrap();
+                            if stream.read_exact(&mut byte).is_err() {
+                                break;
+                            }
                             bytes.push(byte[0]);
                             assert!(bytes.len() < 16384);
+                        }
+                        if bytes.is_empty() || !bytes.ends_with(b"\r\n\r\n") {
+                            break;
                         }
                         let head = String::from_utf8(bytes).unwrap();
                         let authenticated = head.contains("xi-api-key: fake-check-secret\r\n");
