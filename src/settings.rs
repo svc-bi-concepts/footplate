@@ -721,7 +721,24 @@ impl Settings {
     pub fn read(file: &Path) -> Settings {
         let kept = fs::read_to_string(file)
             .ok()
-            .and_then(|text| serde_json::from_str::<Settings>(&text).ok())
+            .and_then(|text| {
+                serde_json::from_str::<Settings>(&text).ok().or_else(|| {
+                    // One value from a newer or edited file must not throw
+                    // away unrelated choices. Let Kept judge each field so
+                    // its defaults and migrations still have one definition.
+                    let mut value: serde_json::Value = serde_json::from_str(&text).ok()?;
+                    let fields = value.as_object_mut()?;
+                    let had_provider = fields.contains_key("voice_provider");
+                    fields.retain(|name, value| {
+                        serde_json::from_value::<Kept>(serde_json::json!({name: value})).is_ok()
+                    });
+                    if had_provider && !fields.contains_key("voice_provider") {
+                        // An unknown provider must not enable the default one.
+                        fields.insert("voice".into(), false.into());
+                    }
+                    serde_json::from_value(value).ok()
+                })
+            })
             .unwrap_or_default();
         Settings {
             text: kept.text.clamp(TEXT_MIN, TEXT_MAX),
@@ -1300,6 +1317,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn elevenlabs_settings_and_key_survive_reading_again() {
+        use crate::voice::Provider;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let set = Settings {
+            voice: true,
+            voice_provider: Provider::ElevenLabs,
+            elevenlabs_agent: "agent-test".into(),
+            elevenlabs_voice: "voice-test".into(),
+            voice_idle: 12,
+            voice_name: "ash".into(),
+            voice_microphone: "coreaudio:test".into(),
+            section: Section::Voice,
+            ..Settings::default()
+        };
+        set.write(&file).unwrap();
+        // A temporary directory stands in for the person's credential store.
+        yard::keep_provider_key(
+            Provider::ElevenLabs,
+            &file.with_file_name(Provider::ElevenLabs.key_file()),
+            "test-elevenlabs-key",
+        )
+        .unwrap();
+        assert_eq!(Settings::read(&file), set);
+        assert_eq!(
+            yard::provider_key_as(Settings::read(&file).voice_provider, None, Some(&file)).unwrap(),
+            "test-elevenlabs-key"
+        );
+        assert!(
+            !fs::read_to_string(&file)
+                .unwrap()
+                .contains("test-elevenlabs-key")
+        );
+    }
+
+    #[test]
+    fn an_unreadable_setting_keeps_the_other_voice_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        for extra in [
+            serde_json::json!({"future_setting": {"version": 2}}),
+            serde_json::json!({"look": "future-look"}),
+            serde_json::json!({"text": "large"}),
+            serde_json::json!({"voice_provider": "future-provider"}),
+        ] {
+            let mut json = serde_json::json!({
+                "text": 17,
+                "voice": true,
+                "voice_provider": "eleven_labs",
+                "elevenlabs_agent": "agent-test",
+                "elevenlabs_voice": "voice-test",
+                "voice_idle": 12,
+                "voice_microphone": "coreaudio:test"
+            });
+            json.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            fs::write(&file, json.to_string()).unwrap();
+            let kept = Settings::read(&file);
+            assert_eq!(kept.elevenlabs_agent, "agent-test", "{extra}");
+            assert_eq!(kept.elevenlabs_voice, "voice-test", "{extra}");
+            assert_eq!(kept.voice_idle, 12, "{extra}");
+            assert_eq!(kept.voice_microphone, "coreaudio:test", "{extra}");
+            if extra.get("voice_provider").is_none() {
+                assert_eq!(kept.voice_provider, crate::voice::Provider::ElevenLabs);
+                assert!(kept.voice);
+            } else {
+                assert!(!kept.voice);
+            }
+        }
+        // A file from before provider selection keeps the older voice choices.
+        fs::write(
+            &file,
+            r#"{"voice_name":"ash","voice_idle":12,"future":true}"#,
+        )
+        .unwrap();
+        let kept = Settings::read(&file);
+        assert_eq!(kept.voice_name, "ash");
+        assert_eq!(kept.voice_idle, 12);
+        assert_eq!(kept.voice_provider, crate::voice::Provider::OpenAi);
+    }
+
+    #[test]
     fn what_is_written_is_read_back() {
         let dir = tempfile::tempdir().unwrap();
         // The directory is not there before the first change.
@@ -1473,12 +1573,14 @@ mod tests {
             "{\"text\": 17, \"look\": \"da",
             "[]",
             "{\"text\": \"large\"}",
-            "{\"text\": 17, \"look\": \"sepia\"}",
             "{\"text\": 1000}",
         ] {
             fs::write(&file, damaged).unwrap();
             assert_eq!(Settings::read(&file), today, "{damaged}");
         }
+        fs::write(&file, r#"{"text":17,"look":"sepia"}"#).unwrap();
+        assert_eq!(Settings::read(&file).text, 17);
+        assert_eq!(Settings::read(&file).look, Look::Auto);
         fs::write(&file, [0xff, 0xfe, 0x00]).unwrap();
         assert_eq!(Settings::read(&file), today);
     }

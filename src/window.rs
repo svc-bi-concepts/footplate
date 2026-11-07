@@ -11673,17 +11673,19 @@ yardr.dev
     }
 
     #[gpui::test]
-    fn provider_settings_save_separate_masked_keys_without_starting_voice(cx: &mut TestAppContext) {
+    fn provider_settings_save_separate_masked_keys_without_starting_voice(
+        app: &mut TestAppContext,
+    ) {
         use crate::voice::Provider;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("footplate/settings.json");
         let yard = Yard::start();
         a_yard_of_jo(&yard);
-        cx.update(|cx| {
+        app.update(|cx| {
             input::bind_keys(cx);
             bind_keys(cx);
         });
-        let (view, cx) = opened_kept(&yard, &file, cx);
+        let (view, cx) = opened_kept(&yard, &file, app);
         view.update(cx, |v, _| {
             v.means.voice =
                 Rc::new(|_, _, _, _, _| panic!("settings/off must not start voice or read a key"));
@@ -11748,6 +11750,22 @@ yardr.dev
             yard::provider_key_as(Provider::ElevenLabs, None, Some(&file)).unwrap(),
             "elevenlabs-test-key"
         );
+        click_on(cx, "voice provider ElevenLabs Agent");
+        cx.simulate_keystrokes("secondary-, secondary-,");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.elevenlabs_agent.read(cx).text(), "agent-offline");
+            assert_eq!(v.elevenlabs_voice.read(cx).text(), "voice-offline");
+        });
+
+        // A fresh window reads the files as a restarted app does. The key
+        // field stays empty: only an explicit session start reads a key.
+        let (again, cx) = opened_kept(&yard, &file, app);
+        again.read_with(cx, |v, cx| {
+            assert_eq!(v.settings.voice_provider, Provider::ElevenLabs);
+            assert_eq!(v.elevenlabs_agent.read(cx).text(), "agent-offline");
+            assert_eq!(v.elevenlabs_voice.read(cx).text(), "voice-offline");
+            assert_eq!(v.voice_key.read(cx).text(), "");
+        });
     }
 
     #[gpui::test]
