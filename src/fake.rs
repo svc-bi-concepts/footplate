@@ -2703,6 +2703,8 @@ pub(crate) struct Agent {
     pub(crate) heads: Mutex<Vec<String>>,
     pub(crate) status: Mutex<Option<u16>>,
     pub(crate) signed_status: Mutex<Option<u16>>,
+    pub(crate) signed_body: Mutex<Option<Value>>,
+    pub(crate) tool_status: Mutex<Option<u16>>,
     pub(crate) upgrade_status: Mutex<Option<u16>>,
     pub(crate) pause: Mutex<Option<String>>,
     pub(crate) config: Mutex<Value>,

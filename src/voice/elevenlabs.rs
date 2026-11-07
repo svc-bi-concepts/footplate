@@ -58,6 +58,7 @@ fn refusal(status: u16, code: &str, signed: bool) -> String {
 fn error_code(event: &Value) -> &str {
     event
         .pointer("/error_event/error_name")
+        .or_else(|| event.pointer("/detail/code"))
         .or_else(|| event.pointer("/detail/status"))
         .and_then(Value::as_str)
         .unwrap_or("")
@@ -251,6 +252,7 @@ impl SiteError {
                     "quota_exceeded" => "quota exhausted",
                     "rate_limit_exceeded" => "quota or rate limit reached",
                     "invalid_api_key" => "key rejected",
+                    "missing_permissions" => "access forbidden",
                     "agent_not_found" => "agent not found",
                     "voice_not_found" => "voice not found",
                     _ => match status {
@@ -301,6 +303,7 @@ fn site_read(
             | "rate_limited"
             | "system_busy" => "rate_limit_exceeded",
             "invalid_api_key" | "authentication_error" => "invalid_api_key",
+            "missing_permissions" | "insufficient_permissions" => "missing_permissions",
             "agent_not_found" => "agent_not_found",
             "voice_not_found" => "voice_not_found",
             "model_not_found" | "model_unavailable" | "permission_denied" => "permission_denied",
@@ -312,17 +315,20 @@ fn site_read(
     serde_json::from_slice(&body).map_err(|_| SiteError::Unreadable)
 }
 
-fn site_json(
-    endpoint: &Endpoint,
-    control: &Control,
-    path: &str,
-    key: &str,
-) -> Result<Value, String> {
-    site_read(endpoint, control, path, key, None).map_err(|error| match error {
+/// Signing follows a successful authenticated agent read. A refusal here
+/// points to the key's session permission, rather than asking for that key again.
+fn signing_error(error: SiteError) -> String {
+    let why = match error {
+        SiteError::Status(status, code)
+            if matches!(status, 401 | 403) || code == "missing_permissions" =>
+        {
+            format!("ElevenLabs key lacks ElevenAgents permission for signed URLs (HTTP {status}). Voice stopped; start again explicitly.")
+        }
         SiteError::Status(status, code) => refusal(status, code, false),
         SiteError::Unreadable => "ElevenLabs returned an unreadable response".into(),
         SiteError::Network => "ElevenLabs network request failed. Voice stopped; start again explicitly. No automatic retry was made.".into(),
-    })
+    };
+    format!("signed URL: {why}")
 }
 
 /// Results describe only the stored configuration submitted for this check.
@@ -485,43 +491,57 @@ fn connect(
     yard: &str,
     counterpart: &str,
 ) -> Result<WsConn, String> {
-    let config = site_json(
+    let config = site_read(
         endpoint,
         control,
         &format!("/v1/convai/agents/{agent}"),
         key,
-    )?;
+        None,
+    )
+    .map_err(|error| format!("agent: {}", error.diagnostic("agent")))?;
     checked_configuration(&config, !voice.is_empty(), |id| {
-        site_json(endpoint, control, &format!("/v1/convai/tools/{id}"), key)
+        site_read(
+            endpoint,
+            control,
+            &format!("/v1/convai/tools/{id}"),
+            key,
+            None,
+        )
+        .map_err(|error| format!("agent tool: {}", error.diagnostic("agent tool")))
     })?;
     if config["agent_id"].as_str() != Some(agent) {
         return Err("ElevenLabs returned another agent.".into());
     }
-    let signed = site_json(
+    let signed = site_read(
         endpoint,
         control,
         &format!("/v1/convai/conversation/get-signed-url?agent_id={agent}"),
         key,
-    )?;
-    let url = endpoint.signed(
-        signed["signed_url"]
-            .as_str()
-            .ok_or("ElevenLabs returned no signed address")?,
-    )?;
+        None,
+    )
+    .map_err(signing_error)?;
+    let url = signed["signed_url"]
+        .as_str()
+        .ok_or_else(|| "signed URL: ElevenLabs returned no signed address".to_string())
+        .and_then(|text| {
+            endpoint
+                .signed(text)
+                .map_err(|why| format!("signed URL: {why}"))
+        })?;
     if control.stopped() {
         return Err("session stopped".into());
     }
     // The signed URL expires for a new connection after 15 minutes. It is
     // consumed immediately, once, with no reconnect or refresh loop.
-    let mut conn =
-        WsConn::connect_controlled(&url, &[], Some(control)).map_err(connection_error)?;
+    let mut conn = WsConn::connect_controlled(&url, &[], Some(control))
+        .map_err(|error| format!("connect: {}", connection_error(error)))?;
     if control.stopped() {
         return Err("session stopped".into());
     }
     conn.set_poll(POLL)
-        .map_err(|_| "could not follow ElevenLabs socket")?;
+        .map_err(|_| "connect: could not follow ElevenLabs socket")?;
     conn.send_text(&hello(yard, counterpart, voice).to_string())
-        .map_err(|_| "could not start ElevenLabs")?;
+        .map_err(|_| "connect: could not start ElevenLabs")?;
     Ok(conn)
 }
 
@@ -1118,6 +1138,10 @@ pub(crate) mod stand_in {
                             }
                             Err(_) => break,
                         };
+                        // On macOS an accepted socket can inherit the listener's
+                        // nonblocking mode. Read the complete request even when
+                        // accept wins the race with the client's first write.
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(15)))
                             .unwrap();
@@ -1242,11 +1266,15 @@ pub(crate) mod stand_in {
             let signed = line.contains("get-signed-url");
             let status = if signed {
                 *agent.signed_status.lock().unwrap()
+            } else if line.starts_with("GET /v1/convai/tools/") {
+                *agent.tool_status.lock().unwrap()
             } else {
                 *agent.status.lock().unwrap()
             }
             .unwrap_or(200);
-            let body = if status != 200 {
+            let body = if signed && agent.signed_body.lock().unwrap().is_some() {
+                agent.signed_body.lock().unwrap().clone().unwrap()
+            } else if status != 200 {
                 json!({"error": "fake-eleven-key", "signed_url": socket})
             } else if signed {
                 json!({"signed_url": socket})
@@ -1995,6 +2023,7 @@ mod tests {
             (402, false),
             (429, false),
             (401, true),
+            (403, true),
             (410, true),
             (302, true),
         ] {
@@ -2013,11 +2042,15 @@ mod tests {
                 panic!()
             };
             assert!(why.contains(&status.to_string()));
-            if status == 401 {
-                assert!(
-                    why.contains("authentication"),
-                    "signing still authenticates the key"
-                );
+            assert!(
+                why.starts_with(if signed { "signed URL: " } else { "agent: " }),
+                "{why}"
+            );
+            if signed && matches!(status, 401 | 403) {
+                assert!(why.contains("key lacks ElevenAgents permission"), "{why}");
+                assert!(!why.contains("check your ElevenLabs key"));
+            } else if status == 401 {
+                assert!(why.contains("key rejected"), "{why}");
             }
             assert!(
                 !why.contains("fake-eleven-key")
@@ -2033,6 +2066,86 @@ mod tests {
     }
 
     #[test]
+    fn signing_permission_codes_and_bad_answers_keep_the_step_and_redact() {
+        // Errors documents detail.code; older providers still send detail.status.
+        for (status, body, reason) in [
+            (
+                400,
+                json!({"detail": {"code": "insufficient_permissions", "message": "SECRET provider prose"}}),
+                "key lacks ElevenAgents permission",
+            ),
+            (
+                400,
+                json!({"detail": {"code": "missing_permissions", "message": "SECRET provider prose"}}),
+                "key lacks ElevenAgents permission",
+            ),
+            (
+                400,
+                json!({"detail": {"status": "missing_permissions", "message": "SECRET provider prose"}}),
+                "key lacks ElevenAgents permission",
+            ),
+            (
+                500,
+                json!({"detail": {"code": "SECRET provider prose", "message": "SECRET"}}),
+                "request refused",
+            ),
+            (
+                200,
+                json!({"signed_url": "wss://evil.invalid/SECRET"}),
+                "signed address",
+            ),
+            (
+                200,
+                json!({"message": "SECRET provider prose"}),
+                "no signed address",
+            ),
+        ] {
+            let agent = Arc::new(Agent::new());
+            *agent.signed_status.lock().unwrap() = Some(status);
+            *agent.signed_body.lock().unwrap() = Some(body);
+            let fake = SocketAgent::start(agent.clone());
+            let (tell, told) = mpsc::channel();
+            let Start::On(voice) = fake.start_voice(true, "south", "chris", tell) else {
+                panic!()
+            };
+            let Update::Refused(why) = told.recv_timeout(Duration::from_secs(4)).unwrap() else {
+                panic!()
+            };
+            assert!(
+                why.starts_with("signed URL: ") && why.contains(reason),
+                "{why}"
+            );
+            assert!(
+                !why.contains("SECRET") && !why.contains("fake-eleven-key") && !why.contains("://"),
+                "{why}"
+            );
+            voice.stop();
+            assert_eq!(agent.heads.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn start_tool_refusal_uses_the_diagnostic_words_and_never_signs() {
+        let agent = Arc::new(Agent::new());
+        agent.config.lock().unwrap()["conversation_config"]["agent"]["prompt"]["tool_ids"] =
+            json!(["tool_test"]);
+        *agent.tool_status.lock().unwrap() = Some(403);
+        let fake = SocketAgent::start(agent.clone());
+        let (tell, told) = mpsc::channel();
+        let Start::On(voice) = fake.start_voice(true, "south", "chris", tell) else {
+            panic!()
+        };
+        let Update::Refused(why) = told.recv_timeout(Duration::from_secs(4)).unwrap() else {
+            panic!()
+        };
+        assert_eq!(why, "agent tool: access forbidden (HTTP 403)");
+        voice.stop();
+        let heads = agent.heads.lock().unwrap();
+        assert_eq!(heads.len(), 2);
+        assert!(heads[1].starts_with("GET /v1/convai/tools/tool_test "));
+    }
+
+    #[test]
     fn expired_signed_websocket_is_refused_without_refresh_or_credential_echo() {
         let agent = Arc::new(Agent::new());
         *agent.upgrade_status.lock().unwrap() = Some(401);
@@ -2044,7 +2157,10 @@ mod tests {
         let Update::Refused(why) = told.recv_timeout(Duration::from_secs(4)).unwrap() else {
             panic!()
         };
-        assert!(why.contains("expired"));
+        assert!(
+            why.starts_with("connect: ") && why.contains("expired"),
+            "{why}"
+        );
         assert!(
             !why.contains("fake-eleven-key")
                 && !why.contains("FAKE-SIGNED-SECRET")

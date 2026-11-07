@@ -358,7 +358,9 @@ folder. A change is drawn at once and kept for the next start:
   incompatible configuration. Provider response text is withheld because it
   can echo credentials. This check uses the protected file, independently of
   an environment override, and never obtains a signed URL, starts a voice
-  session or opens audio. A result belongs to the submitted values; editing
+  session or opens audio. An ok result therefore does not check the key's
+  permission to obtain a signed URL; Start can still refuse at that step.
+  A result belongs to the submitted values; editing
   IDs, saving a key or switching provider clears it, and late results are
   discarded. The check is bounded to 20 seconds and at most 32 referenced
   tools. It verifies access and configuration, not available session credits
@@ -761,6 +763,24 @@ A session retains at most 256 tool-call IDs, then ends rather than forgetting
 an ID that could send duplicate mail.
 Voice off, stop, a hidden window or a yard/conversation/provider switch closes
 the session and its audio; a new session needs a new explicit start.
+
+The key needs **ElevenAgents** permission to read the Agent and any referenced
+tools, and to obtain a signed URL for Start. **Test connection** additionally
+needs **Voices: Read** for the selected or default voice. Keep other permissions
+disabled. ElevenLabs' [API Authentication](https://elevenlabs.io/docs/api-reference/authentication)
+describes endpoint scope restrictions; its [Get signed URL reference](https://elevenlabs.io/docs/api-reference/conversations/get-signed-url)
+and [Agent authentication guide](https://elevenlabs.io/docs/eleven-agents/customization/authentication)
+describe the authenticated signing request. These references do not specify a
+separate signed-URL scope or its Read/Write mapping; an ok Agent read alone does
+not establish permission to sign.
+
+Start names a failed signing request **signed URL:** and a failed WebSocket
+connection **connect:**. After a successful Agent read, a signed-URL HTTP 401/403
+or a known missing-permission code reports that the key lacks ElevenAgents
+permission for signed URLs. Check that permission on the key Start uses (see
+[Voice settings](#settings) for key selection). A refusal at **connect:**
+concerns the signed address or connection. Provider
+messages and URLs remain withheld in both cases.
 
 The native app requests a signed URL with `xi-api-key`, then connects without
 a key header. It permits only TLS at `api.elevenlabs.io`, follows no redirects,
