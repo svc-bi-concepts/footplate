@@ -1935,6 +1935,14 @@ impl Address {
     }
 
     fn connect(&self, timeout: Option<Duration>) -> io::Result<Conn> {
+        self.connect_until(timeout, None)
+    }
+
+    fn connect_until(
+        &self,
+        timeout: Option<Duration>,
+        deadline: Option<Instant>,
+    ) -> io::Result<Conn> {
         let mut last = io::Error::new(
             io::ErrorKind::NotFound,
             format!("{} names no address", self.host),
@@ -1949,7 +1957,15 @@ impl Address {
             ));
         }
         for addr in addrs {
-            match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            let remaining = match deadline {
+                Some(deadline) => deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|left| !left.is_zero())
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?
+                    .min(CONNECT_TIMEOUT),
+                None => CONNECT_TIMEOUT,
+            };
+            match TcpStream::connect_timeout(&addr, remaining) {
                 Ok(conn) => {
                     tcp = Some(conn);
                     break;
@@ -2733,7 +2749,15 @@ fn kratos_errors(bytes: &[u8]) -> Vec<String> {
 /// a redirect is such a status. A file longer than `most` bytes is not
 /// read to its end.
 pub fn read(address: &Address, path: &str, most: u64) -> Result<(u16, Vec<u8>)> {
-    read_with_headers(address, path, most, &[], |status| status == 200, |_| {})
+    read_with_headers(
+        address,
+        path,
+        most,
+        &[],
+        None,
+        |status| status == 200,
+        |_| {},
+    )
 }
 
 /// A bounded site read with caller-owned authentication. Redirects remain
@@ -2746,6 +2770,7 @@ pub(crate) fn read_with_headers(
     path: &str,
     most: u64,
     headers: &[(&str, &str)],
+    deadline: Option<Instant>,
     read_body: impl FnOnce(u16) -> bool,
     connected: impl FnOnce(EventStop),
 ) -> Result<(u16, Vec<u8>)> {
@@ -2758,7 +2783,7 @@ pub(crate) fn read_with_headers(
         }
         extra.push_str(&format!("{name}: {value}\r\n"));
     }
-    let mut conn = address.connect(Some(CALL_TIMEOUT))?;
+    let mut conn = address.connect_until(Some(CALL_TIMEOUT), deadline)?;
     connected(conn.event_stop()?);
     conn.write_all(
         format!(

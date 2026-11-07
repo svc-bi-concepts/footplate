@@ -273,8 +273,9 @@ fn site_read(
     control: &Control,
     path: &str,
     key: &str,
+    deadline: Option<Instant>,
 ) -> Result<Value, SiteError> {
-    if control.stopped() {
+    if control.stopped() || deadline.is_some_and(|at| Instant::now() >= at) {
         return Err(SiteError::Network);
     }
     let site = crate::api::Address::parse(&endpoint.site).map_err(|_| SiteError::Network)?;
@@ -283,6 +284,7 @@ fn site_read(
         path,
         MOST,
         &[("xi-api-key", key)],
+        deadline,
         |_| true,
         |stop| control.follow_site(stop),
     );
@@ -316,7 +318,7 @@ fn site_json(
     path: &str,
     key: &str,
 ) -> Result<Value, String> {
-    site_read(endpoint, control, path, key).map_err(|error| match error {
+    site_read(endpoint, control, path, key, None).map_err(|error| match error {
         SiteError::Status(status, code) => refusal(status, code, false),
         SiteError::Unreadable => "ElevenLabs returned an unreadable response".into(),
         SiteError::Network => "ElevenLabs network request failed. Voice stopped; start again explicitly. No automatic retry was made.".into(),
@@ -350,20 +352,41 @@ fn check_stored(settings: Option<&Path>, agent: &str, voice: &str, endpoint: &En
             return checks;
         }
     };
+    check_with_deadline(endpoint, &key, agent, voice, checks, Instant::now() + WAIT)
+}
+
+fn check_with_deadline(
+    endpoint: &Endpoint,
+    key: &str,
+    agent: &str,
+    voice: &str,
+    checks: Checks,
+    deadline: Instant,
+) -> Checks {
     let control = Control::default();
     let (done, wait) = mpsc::channel();
-    let timer = std::thread::spawn({
+    std::thread::spawn({
         let control = control.clone();
+        let endpoint = endpoint.clone();
+        let key = key.to_string();
+        let agent = agent.to_string();
+        let voice = voice.to_string();
         move || {
-            if wait.recv_timeout(WAIT).is_err() {
-                control.stop();
-            }
+            let result = check_key(&endpoint, &control, &key, &agent, &voice, checks, deadline);
+            let _ = done.send(result);
         }
     });
-    let checks = check_key(endpoint, &control, &key, agent, voice, checks);
-    let _ = done.send(());
-    let _ = timer.join();
-    checks
+    match wait.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(checks) => checks,
+        Err(_) => {
+            control.stop();
+            Checks {
+                key: "check timed out".into(),
+                agent: "check timed out".into(),
+                voice: "check timed out".into(),
+            }
+        }
+    }
 }
 
 fn check_key(
@@ -373,18 +396,16 @@ fn check_key(
     agent: &str,
     voice: &str,
     mut checks: Checks,
+    deadline: Instant,
 ) -> Checks {
-    let read = |path: &str| site_read(endpoint, control, path, key);
-    checks.key = match read("/v1/user") {
-        Ok(_) => "ok".into(),
-        Err(error) => {
-            checks.key = error.diagnostic("key");
-            return checks;
-        }
-    };
+    let read = |path: &str| site_read(endpoint, control, path, key, Some(deadline));
     let config = if identifier(agent) {
         read(&format!("/v1/convai/agents/{agent}"))
-            .map_err(|error| error.diagnostic("agent"))
+            .inspect(|_| checks.key = "ok".into())
+            .map_err(|error| {
+                checks.key = error.diagnostic("agent");
+                error.diagnostic("agent")
+            })
             .and_then(|config| {
                 if config["agent_id"].as_str() == Some(agent) {
                     Ok(config)
@@ -1407,7 +1428,6 @@ mod tests {
         for voice in ["voice_test", ""] {
             let (checks, paths) = diagnostic(
                 vec![
-                    (200, json!({})),
                     (200, good_config()),
                     (200, json!({"voice_id": "voice_test"})),
                 ],
@@ -1418,11 +1438,7 @@ mod tests {
             assert_eq!(checks.voice, "ok");
             assert_eq!(
                 paths,
-                [
-                    "/v1/user",
-                    "/v1/convai/agents/agent_test",
-                    "/v1/voices/voice_test"
-                ]
+                ["/v1/convai/agents/agent_test", "/v1/voices/voice_test"]
             );
         }
     }
@@ -1437,9 +1453,8 @@ mod tests {
             (429, "quota or rate limit"),
             (500, "request refused"),
         ] {
-            for item in 0..3 {
+            for item in 0..2 {
                 let mut replies = vec![
-                    (200, json!({})),
                     (200, good_config()),
                     (200, json!({"voice_id": "voice_test"})),
                 ];
@@ -1447,17 +1462,16 @@ mod tests {
                     status,
                     json!({"detail": {"message": "fake-check-secret SECRET", "status": "SECRET"}}),
                 );
-                if item == 0 {
-                    replies.truncate(1);
-                }
                 let (checks, paths) = diagnostic(replies, "voice_test");
-                let text = [&checks.key, &checks.agent, &checks.voice][item];
+                let text = [&checks.agent, &checks.voice][item];
                 assert!(text.contains(expected));
                 assert!(text.contains(&format!("HTTP {status}")));
-                assert_eq!(paths.len(), if item == 0 { 1 } else { 3 });
+                assert_eq!(paths.len(), 2);
                 if item == 0 {
-                    assert_eq!(checks.agent, "not checked");
-                    assert_eq!(checks.voice, "not checked");
+                    assert_eq!(checks.key, checks.agent);
+                    assert_eq!(checks.voice, "ok");
+                } else {
+                    assert_eq!(checks.key, "ok");
                 }
             }
         }
@@ -1471,12 +1485,11 @@ mod tests {
             (0, "quota_exceeded", "quota exhausted"),
             (0, "insufficient_credits", "quota exhausted"),
             (0, "invalid_api_key", "key rejected"),
-            (1, "agent_not_found", "agent not found"),
-            (2, "voice_not_found", "voice not found"),
-            (2, "rate_limit_exceeded", "rate limit"),
+            (0, "agent_not_found", "agent not found"),
+            (1, "voice_not_found", "voice not found"),
+            (1, "rate_limit_exceeded", "rate limit"),
         ] {
             let mut replies = vec![
-                (200, json!({})),
                 (200, good_config()),
                 (200, json!({"voice_id": "voice_test"})),
             ];
@@ -1484,11 +1497,8 @@ mod tests {
                 401,
                 json!({"detail": {"status": code, "message": "fake-check-secret SECRET"}}),
             );
-            if item == 0 {
-                replies.truncate(1);
-            }
             let (checks, _) = diagnostic(replies, "voice_test");
-            assert!([&checks.key, &checks.agent, &checks.voice][item].contains(expected));
+            assert!([&checks.agent, &checks.voice][item].contains(expected));
         }
     }
 
@@ -1500,7 +1510,6 @@ mod tests {
         config["conversation_config"]["agent"]["prompt"]["tool_ids"] = json!(["tool_test"]);
         let (checks, paths) = diagnostic(
             vec![
-                (200, json!({})),
                 (200, config.clone()),
                 (200, json!({"tool_config": tool})),
                 (200, json!({"voice_id": "voice_test"})),
@@ -1508,11 +1517,10 @@ mod tests {
             "voice_test",
         );
         assert_eq!(checks.agent, "ok");
-        assert_eq!(paths[2], "/v1/convai/tools/tool_test");
+        assert_eq!(paths[1], "/v1/convai/tools/tool_test");
         config["platform_settings"]["auth"]["enable_auth"] = json!(false);
         let (checks, _) = diagnostic(
             vec![
-                (200, json!({})),
                 (200, config),
                 (200, json!({"tool_config": tool})),
                 (200, json!({"voice_id": "voice_test"})),
@@ -1526,9 +1534,8 @@ mod tests {
     #[test]
     fn diagnostic_reports_network_and_unreadable_results_for_each_item() {
         for unreadable in [false, true] {
-            for item in 0..3 {
+            for item in 0..2 {
                 let mut replies = vec![
-                    (200, json!({})),
                     (200, good_config()),
                     (200, json!({"voice_id": "voice_test"})),
                 ];
@@ -1540,12 +1547,9 @@ mod tests {
                         json!({"close": true})
                     },
                 );
-                if item == 0 {
-                    replies.truncate(1);
-                }
                 let (checks, _) = diagnostic(replies, "voice_test");
                 assert_eq!(
-                    [&checks.key, &checks.agent, &checks.voice][item],
+                    [&checks.agent, &checks.voice][item],
                     if unreadable {
                         "unreadable response"
                     } else {
@@ -1561,13 +1565,13 @@ mod tests {
         let mut config = good_config();
         let tool = config["conversation_config"]["agent"]["prompt"]["tools"][0].clone();
         config["conversation_config"]["agent"]["prompt"]["tool_ids"] = json!(vec!["tool_test"; 33]);
-        let mut replies = vec![(200, json!({})), (200, config)];
+        let mut replies = vec![(200, config)];
         replies.extend((0..32).map(|_| (200, json!({"tool_config": tool}))));
         replies.push((200, json!({"voice_id": "voice_test"})));
         let (checks, paths) = diagnostic(replies, "voice_test");
         assert_eq!(checks.agent, "too many agent tools");
         assert_eq!(checks.voice, "ok");
-        assert_eq!(paths.len(), 35);
+        assert_eq!(paths.len(), 34);
     }
 
     #[test]
@@ -1580,7 +1584,6 @@ mod tests {
         assert!(site.paths.lock().unwrap().is_empty());
         let (checks, _) = diagnostic(
             vec![
-                (200, json!({})),
                 (200, json!({"agent_id": "other"})),
                 (200, json!({"voice_id": "other"})),
             ],
@@ -1589,7 +1592,10 @@ mod tests {
         assert!(checks.agent.contains("another agent"));
         assert!(checks.voice.contains("another voice"));
         let (checks, _) = diagnostic(
-            vec![(200, json!({"raw": "fake-check-secret SECRET invalid JSON"}))],
+            vec![
+                (200, json!({"raw": "fake-check-secret SECRET invalid JSON"})),
+                (200, json!({"voice_id": "voice_test"})),
+            ],
             "voice_test",
         );
         assert_eq!(checks.key, "unreadable response");
@@ -1605,13 +1611,117 @@ mod tests {
         let error = site_read(
             &endpoint,
             &Control::default(),
-            "/v1/user",
+            "/v1/convai/agents/agent_test",
             "fake-check-secret",
+            None,
         )
         .err()
         .unwrap();
         assert_eq!(error.diagnostic("key"), "network error");
         peer.join().unwrap();
+    }
+
+    #[test]
+    fn diagnostic_deadline_cancels_agent_tool_and_voice_reads() {
+        use std::io::{Read, Write};
+
+        for stage in 0..3 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = Endpoint {
+                site: format!("http://{}", listener.local_addr().unwrap()),
+                socket: None,
+            };
+            let mut config = good_config();
+            let tool = config["conversation_config"]["agent"]["prompt"]["tools"][0].clone();
+            config["conversation_config"]["agent"]["prompt"]["tools"] = json!([]);
+            config["conversation_config"]["agent"]["prompt"]["tool_ids"] = json!(["tool_test"]);
+            let peer = std::thread::spawn(move || {
+                let mut bodies = [config, json!({"tool_config": tool})].into_iter();
+                for request in 0..=stage {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut head = Vec::new();
+                    let mut byte = [0];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        head.push(byte[0]);
+                    }
+                    if request == stage {
+                        assert_eq!(stream.read(&mut byte).unwrap(), 0);
+                    } else {
+                        let body = bodies.next().unwrap().to_string();
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    }
+                }
+            });
+            let started = Instant::now();
+            let checks = check_with_deadline(
+                &endpoint,
+                "fake-check-secret",
+                "agent_test",
+                "voice_test",
+                Checks {
+                    key: "not checked".into(),
+                    agent: "not checked".into(),
+                    voice: "not checked".into(),
+                },
+                started + Duration::from_millis(200),
+            );
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(checks.key, "check timed out");
+            assert_eq!(checks.agent, "check timed out");
+            assert_eq!(checks.voice, "check timed out");
+            peer.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn diagnostic_connection_setup_rejects_an_expired_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address =
+            crate::api::Address::parse(&format!("http://{}", listener.local_addr().unwrap()))
+                .unwrap();
+        assert!(
+            crate::api::read_with_headers(
+                &address,
+                "/v1/convai/agents/agent_test",
+                MOST,
+                &[("xi-api-key", "fake-check-secret")],
+                Some(Instant::now()),
+                |_| true,
+                |_| panic!("expired check must not connect"),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn diagnostic_expired_deadline_makes_no_requests() {
+        let site = CheckSite::new(vec![]);
+        let checks = check_key(
+            &site.endpoint,
+            &Control::default(),
+            "fake-check-secret",
+            "agent_test",
+            "voice_test",
+            Checks {
+                key: "not checked".into(),
+                agent: "not checked".into(),
+                voice: "not checked".into(),
+            },
+            Instant::now(),
+        );
+        assert_eq!(checks.key, "network error");
+        assert_eq!(checks.agent, "network error");
+        assert_eq!(checks.voice, "network error");
+        assert!(site.paths.lock().unwrap().is_empty());
     }
 
     fn wait_for(mut condition: impl FnMut() -> bool) {

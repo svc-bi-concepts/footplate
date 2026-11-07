@@ -11844,7 +11844,6 @@ yardr.dev
         let (view, cx) = opened_kept(&yard, &file, app);
         let config = crate::fake::Agent::new().config.lock().unwrap().clone();
         let site = Arc::new(CheckSite::new(vec![
-            (200, serde_json::json!({})),
             (200, config),
             (200, serde_json::json!({"voice_id": "voice_test"})),
         ]));
