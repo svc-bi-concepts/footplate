@@ -358,8 +358,8 @@ folder. A change is drawn at once and kept for the next start:
   incompatible configuration. Provider response text is withheld because it
   can echo credentials. This check uses the protected file, independently of
   an environment override, and never obtains a signed URL, starts a voice
-  session or opens audio. An ok result therefore does not check the key's
-  permission to obtain a signed URL; Start can still refuse at that step.
+  session or opens audio. See the [key permissions](#elevenlabs-key-permissions)
+  for the access Test checks and Start requires.
   A result belongs to the submitted values; editing
   IDs, saving a key or switching provider clears it, and late results are
   discarded. The check is bounded to 20 seconds and at most 32 referenced
@@ -680,6 +680,26 @@ For configuration checks and connection testing, see [Voice settings](#settings)
 Footplate creates or modifies no account agent. Live language quality and
 workspace settings still need commissioning; tests use a fake provider, not a model.
 
+### ElevenLabs key permissions
+
+For the key saved in Footplate, set **ElevenAgents = Write** and
+**Voices = Read** in ElevenLabs' API key settings. Keep other permissions
+disabled. These are the runtime
+permissions for an existing Agent; creating and configuring that Agent is a
+separate manual setup step. See ElevenLabs' [API key scope guidance](https://elevenlabs.io/docs/overview/administration/workspaces/api-keys)
+and [permission reference](https://elevenlabs.io/docs/api-reference/service-accounts/api-keys/create).
+
+**Test connection** checks only Read access to the Agent configuration and
+voice (including Voices Read). **Start** also requests a
+[signed URL](https://elevenlabs.io/docs/api-reference/conversations/get-signed-url),
+which needs ElevenAgents Write. After a successful Agent read, a signed-URL
+HTTP 401/403 or a known missing-permission code reports that the key lacks
+ElevenAgents permission. If Start reports this under `signed URL:`, check
+that the key Start uses has ElevenAgents Write (see [Voice settings](#settings)
+for key selection); Read alone can pass Test and fail at that request.
+
+### Agent configuration
+
 - Require authentication. Choose a German/English-capable voice; enable German
   and English language switching and interruptions. Try Swiss German during
   commissioning; it is not required.
@@ -774,21 +794,9 @@ an ID that could send duplicate mail.
 Voice off, stop, a hidden window or a yard/conversation/provider switch closes
 the session and its audio; a new session needs a new explicit start.
 
-The key needs **ElevenAgents** permission to read the Agent and any referenced
-tools, and to obtain a signed URL for Start. **Test connection** additionally
-needs **Voices: Read** for the selected or default voice. Keep other permissions
-disabled. ElevenLabs' [API Authentication](https://elevenlabs.io/docs/api-reference/authentication)
-describes endpoint scope restrictions; its [Get signed URL reference](https://elevenlabs.io/docs/api-reference/conversations/get-signed-url)
-and [Agent authentication guide](https://elevenlabs.io/docs/eleven-agents/customization/authentication)
-describe the authenticated signing request. These references do not specify a
-separate signed-URL scope or its Read/Write mapping; an ok Agent read alone does
-not establish permission to sign.
-
 Start names a failed signing request **signed URL:** and a failed WebSocket
-connection **connect:**. After a successful Agent read, a signed-URL HTTP 401/403
-or a known missing-permission code reports that the key lacks ElevenAgents
-permission for signed URLs. Check that permission on the key Start uses (see
-[Voice settings](#settings) for key selection). A refusal at **connect:**
+connection **connect:**. For signing permission refusals, see
+[key permissions](#elevenlabs-key-permissions). A refusal at **connect:**
 concerns the signed address or connection. Provider
 messages and URLs remain withheld in both cases.
 
