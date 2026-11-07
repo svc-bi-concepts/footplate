@@ -766,6 +766,21 @@ impl Settings {
         fs::write(file, text)
     }
 
+    /// Saving the IDs is confirmed from disk, including when a retry repeats
+    /// the in-memory values after an earlier write failure.
+    pub(crate) fn save_elevenlabs(&self, file: &Path) -> io::Result<()> {
+        self.write(file)?;
+        let read: Settings = serde_json::from_slice(&fs::read(file)?).map_err(io::Error::other)?;
+        if read.elevenlabs_agent != self.elevenlabs_agent
+            || read.elevenlabs_voice != self.elevenlabs_voice
+        {
+            return Err(io::Error::other(
+                "Agent and voice IDs could not be read back.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Whether closing the window hides footplate, which then goes on
     /// following its yards, where it would else quit: on a Mac (`mac`),
     /// while the menu bar item is on. The item is the way back that is
@@ -1286,6 +1301,25 @@ pub fn file() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn elevenlabs_save_feedback_follows_disk_and_allows_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let settings = Settings {
+            elevenlabs_agent: "agent-test".into(),
+            elevenlabs_voice: "voice-test".into(),
+            ..Settings::default()
+        };
+        std::fs::create_dir(&file).unwrap();
+        assert!(settings.save_elevenlabs(&file).is_err());
+        std::fs::remove_dir(&file).unwrap();
+        settings.save_elevenlabs(&file).unwrap();
+        let saved = Settings::read(&file);
+        assert_eq!(saved.elevenlabs_agent, "agent-test");
+        assert_eq!(saved.elevenlabs_voice, "voice-test");
+        settings.save_elevenlabs(&file).unwrap();
+    }
+
     #[test]
     fn voice_provider_migrates_without_changing_openai_or_enabling_voice() {
         use crate::voice::Provider;

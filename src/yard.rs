@@ -889,6 +889,55 @@ pub fn keep_provider_key(
         })
 }
 
+/// Reads the protected file, returning only a masked indicator. Short keys
+/// stay wholly masked, so even a test or malformed key is never shown whole.
+pub(crate) fn stored_key(
+    provider: crate::voice::Provider,
+    settings: Option<&Path>,
+) -> Result<String, String> {
+    let settings = settings.ok_or("There is no home directory to keep the voice key in.")?;
+    let file = settings.with_file_name(provider.key_file());
+    if !file
+        .try_exists()
+        .map_err(|_| "The key store cannot be read.")?
+    {
+        return Ok("No key stored".into());
+    }
+    let key = provider_key_as(provider, None, Some(settings))?;
+    Ok(masked_key(&key))
+}
+
+/// A save is confirmed only when the protected store returns the same key.
+/// Only its masked indicator leaves this boundary.
+pub(crate) fn keep_provider_key_confirmed(
+    provider: crate::voice::Provider,
+    settings: &Path,
+    key: &str,
+) -> Result<String, String> {
+    keep_provider_key(provider, &settings.with_file_name(provider.key_file()), key)?;
+    let read = provider_key_as(provider, None, Some(settings))?;
+    if read != key.trim() {
+        return Err("The saved key could not be read back.".into());
+    }
+    Ok(masked_key(&read))
+}
+
+fn masked_key(key: &str) -> String {
+    let ending: String = key
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if key.chars().count() > 4 {
+        format!("Key stored (ends …{ending})")
+    } else {
+        "Key stored (masked)".into()
+    }
+}
+
 /// A legacy token alone in `file`, for tests that need a file before its
 /// address has been bound by [`token_for`].
 #[cfg(test)]
@@ -918,6 +967,31 @@ pub fn typed(address: &str, code: &str) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stored_key_feedback_reads_back_only_a_masked_indicator() {
+        use crate::voice::Provider::ElevenLabs;
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let key_file = settings.with_file_name(ElevenLabs.key_file());
+        assert_eq!(
+            stored_key(ElevenLabs, Some(&settings)).unwrap(),
+            "No key stored"
+        );
+        let saved = keep_provider_key_confirmed(ElevenLabs, &settings, "fake-check-x7Q2").unwrap();
+        assert_eq!(saved, "Key stored (ends …x7Q2)");
+        let indicator = stored_key(ElevenLabs, Some(&settings)).unwrap();
+        assert_eq!(indicator, "Key stored (ends …x7Q2)");
+        assert!(!indicator.contains("fake-check"));
+        keep_provider_key(ElevenLabs, &key_file, "tiny").unwrap();
+        assert_eq!(
+            stored_key(ElevenLabs, Some(&settings)).unwrap(),
+            "Key stored (masked)"
+        );
+        std::fs::remove_file(&key_file).unwrap();
+        std::fs::create_dir(&key_file).unwrap();
+        assert!(stored_key(ElevenLabs, Some(&settings)).is_err());
+    }
+
     #[test]
     fn provider_credentials_have_distinct_files_environments_and_markers() {
         use crate::voice::Provider::{ElevenLabs, OpenAi};
