@@ -364,7 +364,10 @@ folder. A change is drawn at once and kept for the next start:
   IDs, saving a key or switching provider clears it, and late results are
   discarded. The check is bounded to 20 seconds and at most 32 referenced
   tools. It verifies access and configuration, not available session credits
-  or a future call's success.
+  or a future call's success. Test checks only Read access; Start also needs
+  ElevenAgents **Write** to obtain a signed URL. A successful Test does not
+  prove that permission. See the [key permissions](#elevenlabs-key-permissions)
+  before starting.
   Otherwise, only an explicit session start reads a credential for provider
   traffic, and only the selected provider's. Opening Settings makes no
   provider requests, including voice or agent lists.
@@ -679,6 +682,24 @@ Apply this manually in your own workspace before starting an Agent session.
 For configuration checks and connection testing, see [Voice settings](#settings).
 Footplate creates or modifies no account agent. Live language quality and
 workspace settings still need commissioning; tests use a fake provider, not a model.
+
+### ElevenLabs key permissions
+
+For the key saved in Footplate, set **ElevenAgents = Write** and
+**Voices = Read** in ElevenLabs' API key settings. These are the runtime
+permissions for an existing Agent; creating and configuring that Agent is a
+separate manual setup step. See ElevenLabs' [API key scope guidance](https://elevenlabs.io/docs/overview/administration/workspaces/api-keys)
+and [permission reference](https://elevenlabs.io/docs/api-reference/service-accounts/api-keys/create).
+
+**Test connection** checks only Read access to the Agent configuration and
+voice (including Voices Read). **Start** also requests a
+[signed URL](https://elevenlabs.io/docs/api-reference/conversations/get-signed-url),
+which needs ElevenAgents Write. If Test passes but Start reports
+`signed URL:` with HTTP 401 or 403 and a missing ElevenAgents permission,
+check that the key has ElevenAgents Write; Read alone can pass Test and fail
+at that request. Keep Voices Read enabled as well.
+
+### Agent configuration
 
 - Require authentication. Choose a German/English-capable voice; enable German
   and English language switching and interruptions. Try Swiss German during
