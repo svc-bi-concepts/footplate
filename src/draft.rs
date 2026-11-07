@@ -906,6 +906,25 @@ impl Drafts {
         id
     }
 
+    #[cfg(any(target_os = "macos", test))]
+    pub fn replace(&mut self, id: u64, found: Found) -> bool {
+        let Some(attachment) = self
+            .all_mut()
+            .flat_map(|d| &mut d.attachments)
+            .find(|a| a.id == id)
+        else {
+            return false;
+        };
+        *attachment = Attachment {
+            id,
+            name: found.name,
+            bytes: found.bytes,
+            size: found.size,
+            refused: found.refused,
+        };
+        true
+    }
+
     /// Takes the attachment `id` off whichever draft has it: an id is its
     /// attachment's alone, in whichever yard.
     pub fn remove(&mut self, id: u64) -> bool {
@@ -979,6 +998,23 @@ mod tests {
 
     fn ids(drafts: &Drafts, with: &str) -> Vec<u64> {
         drafts.attachments(with).iter().map(|a| a.id).collect()
+    }
+
+    #[test]
+    fn completing_an_attachment_preserves_its_place_and_removal() {
+        let mut drafts = Drafts::default();
+        drafts.turn_to("first");
+        let id = drafts.attach("yardmaster", pasted(Vec::new()));
+        let next = drafts.attach("yardmaster", pasted(vec![2]));
+        drafts.turn_to("second");
+        assert!(drafts.replace(id, pasted(vec![1])));
+        assert!(drafts.attachments("yardmaster").is_empty());
+        drafts.turn_to("first");
+        assert_eq!(ids(&drafts, "yardmaster"), [id, next]);
+        assert_eq!(drafts.attachments("yardmaster")[0].bytes, [1]);
+        assert!(drafts.remove(id));
+        assert!(!drafts.replace(id, pasted(vec![3])));
+        assert_eq!(ids(&drafts, "yardmaster"), [next]);
     }
 
     #[test]

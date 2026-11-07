@@ -957,23 +957,31 @@ impl Footplate {
             crate::input::Pasted::Native(content) => {
                 let content = content.clone();
                 let existing = self.drafts.attachments(&with).len();
-                self.ask(
+                let mut waiting = draft::pasted(Vec::new());
+                waiting.refused = Some("the pasted image is still being read".into());
+                let id = self.attach(&with, waiting, cx);
+                self.ask_through(
                     cx,
                     move |client, _| {
                         let settings = client.settings().ok();
-                        let cap = settings
-                            .as_ref()
-                            .map(|s| s.blob_cap())
-                            .unwrap_or(api::BLOB_MAX_BYTES);
-                        let max = settings
-                            .as_ref()
-                            .map(|s| s.files_cap())
-                            .unwrap_or(api::FILES_MAX);
+                        let cap = settings.as_ref().map(|s| s.blob_cap());
+                        let max = settings.as_ref().map(|s| s.files_cap());
                         content.read(cap, max, existing)
                     },
                     move |this, found, cx| {
-                        if let Some(found) = found {
-                            this.attach(&with, found, cx);
+                        let found = found.unwrap_or_else(|| {
+                            let mut found = draft::pasted(Vec::new());
+                            found.refused = Some("the pasted image could not be read".into());
+                            found
+                        });
+                        let image = model::image_type(&found.bytes)
+                            .and_then(ImageFormat::from_mime_type)
+                            .map(|format| Arc::new(Image::from_bytes(format, found.bytes.clone())));
+                        if this.drafts.replace(id, found) {
+                            if let Some(image) = image {
+                                this.thumbs.insert(id, image);
+                            }
+                            cx.notify();
                         }
                     },
                 );
