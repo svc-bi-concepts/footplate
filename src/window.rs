@@ -1068,9 +1068,11 @@ impl Footplate {
         if let Some(file) = &file {
             self.settings = Settings::read(file);
         }
-        self.elevenlabs_key =
-            crate::yard::stored_key(crate::voice::Provider::ElevenLabs, file.as_deref())
-                .unwrap_or_else(|why| why);
+        if self.settings.voice_provider == crate::voice::Provider::ElevenLabs {
+            self.elevenlabs_key =
+                crate::yard::stored_key(crate::voice::Provider::ElevenLabs, file.as_deref())
+                    .unwrap_or_else(|why| why);
+        }
         self.elevenlabs_agent.update(cx, |line, cx| {
             line.set_text(&self.settings.elevenlabs_agent, cx)
         });
@@ -11798,6 +11800,33 @@ yardr.dev
             assert_eq!(v.elevenlabs_agent.read(cx).text(), "agent-offline");
             assert_eq!(v.elevenlabs_voice.read(cx).text(), "voice-offline");
             assert_eq!(v.voice_key.read(cx).text(), "");
+        });
+    }
+
+    #[gpui::test]
+    fn opening_with_openai_selected_does_not_read_the_elevenlabs_indicator(
+        app: &mut TestAppContext,
+    ) {
+        use crate::voice::Provider;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        Settings::default().write(&file).unwrap();
+        yard::keep_provider_key(
+            Provider::ElevenLabs,
+            &file.with_file_name(Provider::ElevenLabs.key_file()),
+            "fake-indicator-key",
+        )
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened_kept(&yard, &file, app);
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.settings.voice_provider, Provider::OpenAi);
+            assert_eq!(v.elevenlabs_key, "No key stored");
+        });
+        view.update(cx, |v, cx| v.pick_provider(Provider::ElevenLabs, cx));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.elevenlabs_key, "Key stored (ends …-key)")
         });
     }
 

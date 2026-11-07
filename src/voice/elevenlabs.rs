@@ -1111,7 +1111,11 @@ pub(crate) mod stand_in {
                             assert!(bytes.len() < 16384);
                         }
                         let head = String::from_utf8(bytes).unwrap();
-                        assert!(head.contains("xi-api-key: fake-check-secret\r\n"));
+                        let authenticated = head.contains("xi-api-key: fake-check-secret\r\n");
+                        assert!(
+                            authenticated,
+                            "diagnostic did not use its stored credential"
+                        );
                         assert!(!head.contains("Upgrade:") && !head.contains("signed-url"));
                         let path = head
                             .lines()
@@ -1124,6 +1128,9 @@ pub(crate) mod stand_in {
                         paths.lock().unwrap().push(path);
                         let (status, value) =
                             replies.next().expect("unexpected diagnostic request");
+                        if value["close"] == true {
+                            continue;
+                        }
                         let body = value["raw"]
                             .as_str()
                             .map(str::to_string)
@@ -1503,6 +1510,53 @@ mod tests {
         );
         assert!(checks.agent.contains("Require Agent authentication"));
         assert_eq!(checks.voice, "ok");
+    }
+
+    #[test]
+    fn diagnostic_reports_network_and_unreadable_results_for_each_item() {
+        for unreadable in [false, true] {
+            for item in 0..3 {
+                let mut replies = vec![
+                    (200, json!({})),
+                    (200, good_config()),
+                    (200, json!({"voice_id": "voice_test"})),
+                ];
+                replies[item] = (
+                    200,
+                    if unreadable {
+                        json!({"raw": "fake-check-secret SECRET invalid JSON"})
+                    } else {
+                        json!({"close": true})
+                    },
+                );
+                if item == 0 {
+                    replies.truncate(1);
+                }
+                let (checks, _) = diagnostic(replies, "voice_test");
+                assert_eq!(
+                    [&checks.key, &checks.agent, &checks.voice][item],
+                    if unreadable {
+                        "unreadable response"
+                    } else {
+                        "network error"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_bounds_referenced_tool_checks() {
+        let mut config = good_config();
+        let tool = config["conversation_config"]["agent"]["prompt"]["tools"][0].clone();
+        config["conversation_config"]["agent"]["prompt"]["tool_ids"] = json!(vec!["tool_test"; 33]);
+        let mut replies = vec![(200, json!({})), (200, config)];
+        replies.extend((0..32).map(|_| (200, json!({"tool_config": tool}))));
+        replies.push((200, json!({"voice_id": "voice_test"})));
+        let (checks, paths) = diagnostic(replies, "voice_test");
+        assert_eq!(checks.agent, "too many agent tools");
+        assert_eq!(checks.voice, "ok");
+        assert_eq!(paths.len(), 35);
     }
 
     #[test]
