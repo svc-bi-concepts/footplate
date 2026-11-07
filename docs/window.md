@@ -344,9 +344,28 @@ folder. A change is drawn at once and kept for the next start:
   configured manually with the template below; an explicit start checks that
   configuration and obtains a fresh signed WebSocket URL.
   Both providers use the same masked key field, cleared on provider switch.
-  Saving a key works while off and makes no validation request. Only an
-  explicit session start can read a credential, and only the selected
-  provider's. Off makes no provider requests, including voice or agent lists.
+  Saving a key works while off and makes no provider request. ElevenLabs
+  reads its protected key file back to confirm the save and shows a masked
+  stored-key indicator (at most its last four characters), including after a
+  restart. A failed save or read-back shows its error. Enter or Save for the
+  agent and voice IDs confirms that they were read back from settings; a
+  failed save can be retried without editing the IDs again.
+  ElevenLabs' **Test connection** deliberately checks the stored key, saved
+  agent configuration and selected voice over HTTPS, even while voice is
+  off. Save edited IDs before testing. An empty voice ID checks the Agent's
+  default voice. Each item says ok or its refusal: rejected key (HTTP 401),
+  missing agent/voice, forbidden access, quota/rate limit, network error or
+  incompatible configuration. Provider response text is withheld because it
+  can echo credentials. This check uses the protected file, independently of
+  an environment override, and never obtains a signed URL, starts a voice
+  session or opens audio. A result belongs to the submitted values; editing
+  IDs, saving a key or switching provider clears it, and late results are
+  discarded. The check is bounded to 20 seconds and at most 32 referenced
+  tools. It verifies access and configuration, not available session credits
+  or a future call's success.
+  Otherwise, only an explicit session start reads a credential for provider
+  traffic, and only the selected provider's. Opening Settings makes no
+  provider requests, including voice or agent lists.
   Switching provider, saving a key, changing the saved agent configuration,
   or changing yard/conversation stops the session; another needs a new tap.
   The OpenAI key is your own project's, typed

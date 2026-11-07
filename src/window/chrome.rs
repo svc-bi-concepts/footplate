@@ -65,7 +65,7 @@ use super::{Dismiss, JumpNewest, JumpOldest, Leave};
 pub const VOICE_PLAIN: &str = "Microphone audio from this machine streams to OpenAI during a voice session you start, with what you say, the yard's name and the name of who you are talking with, and what they answer in the open conversation. The voice speaks answers in its own words, which may differ from the mail; the written mail in the conversation is the record. No saved session is kept with store off, but what was said may appear in OpenAI's abuse-monitoring logs, kept for up to 30 days by default. Your key stays on this machine, in a file beside the settings. Nothing is sent while voice is off, or while no session stands.";
 
 /// Disclosure for the configured Agent; account settings are not inferred.
-pub const ELEVENLABS_PLAIN: &str = "Voice is off until enabled and explicitly started. A session sends microphone audio, transcripts, tool inputs, the selected yard and crew names, open-conversation context and returned yard mail to ElevenLabs; text also reaches the Agent's LLM provider. Spoken answers may be wrong: written yard mail is the record. Agent call minutes and pass-through LLM usage are charged separately; subscription Agents entitlement and balance are unverified. The meter estimates only calls at $0.08/min before discounts, excluding burst pricing; LLM usage is extra and unknown. Context grows with the conversation. Silence longer than 10 seconds has a 95% call discount; pending work can keep an idle session connected until its finite wait ends. Above-quota use requires purchased PAYG credits or legacy usage billing; Footplate never enables either or switches provider automatically. ElevenLabs retains conversation data for two years by default, with separate transcript and audio controls that can be changed. Before commissioning, check and record retention, audio saving and training choices; recommended: audio saving off, zero-day scheduled deletion where available and training opt-out. These choices are not configured or verified here. Training opt-out concerns future submissions and is separate from deletion. Enterprise Zero Retention Mode and EU residency need eligible access and configuration; ordinary subscriptions promise neither, and EU storage alone does not ensure EU-only processing. Footplate adds no audio archive or duplicate transcript store; ordinary yard mail remains under the yard's rules. Your key stays locally in elevenlabs.key beside settings, owner-only on Unix, and authenticates with ElevenLabs. It never enters settings JSON, yard mail or telemetry. Nothing is sent, no microphone opens and no key is read while voice is off or no session stands.";
+pub const ELEVENLABS_PLAIN: &str = "Voice is off until enabled and explicitly started. A session sends microphone audio, transcripts, tool inputs, the selected yard and crew names, open-conversation context and returned yard mail to ElevenLabs; text also reaches the Agent's LLM provider. Spoken answers may be wrong: written yard mail is the record. Agent call minutes and pass-through LLM usage are charged separately; subscription Agents entitlement and balance are unverified. The meter estimates only calls at $0.08/min before discounts, excluding burst pricing; LLM usage is extra and unknown. Context grows with the conversation. Silence longer than 10 seconds has a 95% call discount; pending work can keep an idle session connected until its finite wait ends. Above-quota use requires purchased PAYG credits or legacy usage billing; Footplate never enables either or switches provider automatically. ElevenLabs retains conversation data for two years by default, with separate transcript and audio controls that can be changed. Before commissioning, check and record retention, audio saving and training choices; recommended: audio saving off, zero-day scheduled deletion where available and training opt-out. These choices are not configured or verified here. Training opt-out concerns future submissions and is separate from deletion. Enterprise Zero Retention Mode and EU residency need eligible access and configuration; ordinary subscriptions promise neither, and EU storage alone does not ensure EU-only processing. Footplate adds no audio archive or duplicate transcript store; ordinary yard mail remains under the yard's rules. Your key stays locally in elevenlabs.key beside settings, owner-only on Unix, and authenticates with ElevenLabs. It never enters settings JSON, yard mail or telemetry. Opening Settings reads only a masked key indicator. Test connection explicitly reads the stored key and checks the key, agent and voice over HTTPS, even while voice is off; it starts no session and opens no microphone. Otherwise, no provider request is made while voice is off or no session stands.";
 
 /// A label of the Voice section's rows, in the column their fields stand
 /// after ([`VOICE_LABEL`]).
@@ -3363,6 +3363,11 @@ impl Footplate {
         // so that the one chosen shows by its name.
         if self.settings_open && self.settings.section == Section::Voice {
             self.read_inputs(cx);
+            if self.settings.voice_provider == crate::voice::Provider::ElevenLabs {
+                self.elevenlabs_key =
+                    yard::stored_key(crate::voice::Provider::ElevenLabs, self.kept.as_deref())
+                        .unwrap_or_else(|why| why);
+            }
         }
         let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
         let focus = match conversation {
@@ -3536,6 +3541,11 @@ impl Footplate {
         self.end_voice(cx);
         self.voice_key.update(cx, |line, cx| line.set_text("", cx));
         self.voice_said = None;
+        self.invalidate_elevenlabs();
+        if provider == crate::voice::Provider::ElevenLabs {
+            self.elevenlabs_key =
+                yard::stored_key(provider, self.kept.as_deref()).unwrap_or_else(|why| why);
+        }
         self.voice_menu = false;
         self.elevenlabs_agent.update(cx, |line, cx| {
             line.set_text(&self.settings.elevenlabs_agent, cx)
@@ -3552,8 +3562,15 @@ impl Footplate {
         );
     }
 
-    /// Saves only the non-secret configuration; no agent is contacted.
+    /// A new edit or save cannot be certified by a result already in flight.
+    pub(crate) fn invalidate_elevenlabs(&mut self) {
+        self.elevenlabs_generation = self.elevenlabs_generation.wrapping_add(1);
+        self.elevenlabs_test = None;
+    }
+
+    /// Saves and reads back the non-secret configuration; no agent is contacted.
     pub(crate) fn submit_elevenlabs(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_elevenlabs();
         self.set(
             Settings {
                 elevenlabs_agent: self.elevenlabs_agent.read(cx).text().trim().to_string(),
@@ -3562,6 +3579,86 @@ impl Footplate {
             },
             cx,
         );
+        let saved = self
+            .kept
+            .as_ref()
+            .ok_or_else(|| "There is no home directory to keep settings in.".to_string())
+            .and_then(|file| {
+                self.settings
+                    .save_elevenlabs(file)
+                    .map_err(|err| err.to_string())
+            });
+        self.unkept = saved.as_ref().err().cloned();
+        self.elevenlabs_saved = Some(match saved {
+            Ok(()) => "Agent and voice IDs saved (read back from settings)".into(),
+            Err(why) => format!("Agent and voice IDs not saved: {why}"),
+        });
+        cx.notify();
+    }
+
+    /// Only an explicit tap runs this read-only check, independently of voice.
+    pub(crate) fn test_elevenlabs(&mut self, cx: &mut Context<Self>) {
+        if self
+            .elevenlabs_test
+            .as_ref()
+            .is_some_and(|(_, _, result)| result.is_none())
+        {
+            return;
+        }
+        let agent = self.settings.elevenlabs_agent.clone();
+        let voice = self.settings.elevenlabs_voice.clone();
+        let saved = self.kept.as_ref().map(|file| Settings::read(file));
+        if self.elevenlabs_agent.read(cx).text().trim() != agent
+            || self.elevenlabs_voice.read(cx).text().trim() != voice
+            || !saved.is_some_and(|saved| {
+                saved.elevenlabs_agent == agent && saved.elevenlabs_voice == voice
+            })
+            || self.unkept.is_some()
+        {
+            self.elevenlabs_saved = Some("Save agent and voice before testing.".into());
+            cx.notify();
+            return;
+        }
+        self.invalidate_elevenlabs();
+        let generation = self.elevenlabs_generation;
+        self.elevenlabs_test = Some((agent.clone(), voice.clone(), None));
+        let file = self.kept.clone();
+        let check = self.means.check_agent.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { check(file.as_deref(), &agent, &voice) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.checked_elevenlabs(generation, result, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Completes only the submitted version, even if a provider answers late.
+    pub(crate) fn checked_elevenlabs(
+        &mut self,
+        generation: u64,
+        result: crate::voice::elevenlabs::Checks,
+        cx: &mut Context<Self>,
+    ) {
+        if self.elevenlabs_generation == generation
+            && self.settings.voice_provider == crate::voice::Provider::ElevenLabs
+            && self
+                .elevenlabs_test
+                .as_ref()
+                .is_some_and(|(agent, voice, _)| {
+                    agent == self.elevenlabs_agent.read(cx).text().trim()
+                        && voice == self.elevenlabs_voice.read(cx).text().trim()
+                })
+            && let Some((_, _, checked)) = &mut self.elevenlabs_test
+        {
+            *checked = Some(result);
+            cx.notify();
+        }
     }
 
     /// A voice session left standing with nobody speaking ends itself after
@@ -3699,6 +3796,7 @@ impl Footplate {
     pub(crate) fn submit_voice_key(&mut self, cx: &mut Context<Self>) {
         self.end_voice(cx);
         let provider = self.settings.voice_provider;
+        self.invalidate_elevenlabs();
         let key = self.voice_key.update(cx, |line, cx| line.take_text(cx));
         cx.notify();
         if key.trim().is_empty() {
@@ -3719,16 +3817,28 @@ impl Footplate {
             ));
             return;
         };
-        let file = file.with_file_name(provider.key_file());
         let saved = match provider {
-            crate::voice::Provider::OpenAi => yard::keep_voice_key(&file, key.trim()),
+            crate::voice::Provider::OpenAi => {
+                yard::keep_voice_key(&file.with_file_name(provider.key_file()), key.trim())
+                    .map(|()| None)
+            }
             crate::voice::Provider::ElevenLabs => {
-                yard::keep_provider_key(provider, &file, key.trim())
+                yard::keep_provider_key_confirmed(provider, file, key.trim()).map(Some)
             }
         };
         match saved {
-            Ok(()) => self.voice_said = None,
-            Err(why) => self.voice_said = Some(why),
+            Ok(Some(indicator)) => {
+                self.elevenlabs_key = indicator.clone();
+                self.voice_said = Some(format!("Key saved. {indicator}"));
+            }
+            Ok(None) => self.voice_said = None,
+            Err(why) => {
+                if provider == crate::voice::Provider::ElevenLabs {
+                    self.elevenlabs_key =
+                        yard::stored_key(provider, self.kept.as_deref()).unwrap_or_else(|why| why);
+                }
+                self.voice_said = Some(why);
+            }
         }
     }
 
@@ -4082,6 +4192,11 @@ impl Footplate {
         }
         if section == Section::Voice {
             self.read_inputs(cx);
+            if self.settings.voice_provider == crate::voice::Provider::ElevenLabs {
+                self.elevenlabs_key =
+                    yard::stored_key(crate::voice::Provider::ElevenLabs, self.kept.as_deref())
+                        .unwrap_or_else(|why| why);
+            }
         }
     }
 
@@ -5162,6 +5277,13 @@ impl Footplate {
             );
         }
         if provider == crate::voice::Provider::ElevenLabs {
+            section = section.child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector(|| "elevenlabs key stored".into())
+                    .child(self.elevenlabs_key.clone()),
+            );
             section = section.child(div().text_sm().text_color(palette.faint).child(
                 "Configure an existing workspace agent manually; opening Settings never creates, changes or lists agents."
             ));
@@ -5223,6 +5345,39 @@ impl Footplate {
                     .debug_selector(|| "elevenlabs save".into())
                     .on_click(cx.listener(|this, _, _, cx| this.submit_elevenlabs(cx))),
             );
+            if let Some(said) = &self.elevenlabs_saved {
+                section = section.child(
+                    div()
+                        .debug_selector(|| "elevenlabs saved".into())
+                        .child(said.clone()),
+                );
+            }
+            section = section.child(
+                small_button("Test connection".into(), palette)
+                    .id("elevenlabs test")
+                    .debug_selector(|| "elevenlabs test".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.test_elevenlabs(cx))),
+            );
+            section = section.child(div().text_sm().text_color(palette.faint)
+                .child("Checks the stored key, agent configuration and voice. No voice session starts. Provider error text is withheld to protect your key."));
+            if let Some((_, _, checks)) = &self.elevenlabs_test {
+                section = section.child(
+                    div()
+                        .debug_selector(|| "elevenlabs test result".into())
+                        .children(
+                            match checks {
+                                Some(checks) => vec![
+                                    format!("Key: {}", checks.key),
+                                    format!("Agent: {}", checks.agent),
+                                    format!("Voice: {}", checks.voice),
+                                ],
+                                None => vec!["Testing connection…".into()],
+                            }
+                            .into_iter()
+                            .map(|text| div().child(text)),
+                        ),
+                );
+            }
         } else {
             // Which voice speaks, and the one thing to know of the choice: the
             // provider fixes a session's voice when it starts. It stands before

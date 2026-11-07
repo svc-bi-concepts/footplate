@@ -525,6 +525,10 @@ pub struct Footplate {
     elevenlabs_agent: Entity<Line>,
     elevenlabs_voice: Entity<Line>,
     voice_said: Option<String>,
+    elevenlabs_key: String,
+    elevenlabs_saved: Option<String>,
+    elevenlabs_generation: u64,
+    elevenlabs_test: Option<(String, String, Option<crate::voice::elevenlabs::Checks>)>,
     #[cfg(test)]
     voice_plain: std::cell::RefCell<Option<gpui::TextLayout>>,
     /// Whether the list of voices stands open under its field in the
@@ -778,6 +782,28 @@ impl Footplate {
             })
             .detach();
         }
+        for field in [&elevenlabs_agent, &elevenlabs_voice] {
+            cx.observe(field, |this, _, cx| {
+                if this.elevenlabs_agent.read(cx).text().trim() != this.settings.elevenlabs_agent
+                    || this.elevenlabs_voice.read(cx).text().trim()
+                        != this.settings.elevenlabs_voice
+                {
+                    this.elevenlabs_saved = None;
+                }
+                if this
+                    .elevenlabs_test
+                    .as_ref()
+                    .is_some_and(|(agent, voice, _)| {
+                        agent != this.elevenlabs_agent.read(cx).text().trim()
+                            || voice != this.elevenlabs_voice.read(cx).text().trim()
+                    })
+                {
+                    this.invalidate_elevenlabs();
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         // Enter in the line about the operator saves it with the chosen
         // style: the next session picks both up.
         let agents_about = cx.new(|cx| {
@@ -986,6 +1012,10 @@ impl Footplate {
             elevenlabs_agent,
             elevenlabs_voice,
             voice_said: None,
+            elevenlabs_key: "No key stored".into(),
+            elevenlabs_saved: None,
+            elevenlabs_generation: 0,
+            elevenlabs_test: None,
             #[cfg(test)]
             voice_plain: std::cell::RefCell::new(None),
             voice_menu: false,
@@ -1038,6 +1068,9 @@ impl Footplate {
         if let Some(file) = &file {
             self.settings = Settings::read(file);
         }
+        self.elevenlabs_key =
+            crate::yard::stored_key(crate::voice::Provider::ElevenLabs, file.as_deref())
+                .unwrap_or_else(|why| why);
         self.elevenlabs_agent.update(cx, |line, cx| {
             line.set_text(&self.settings.elevenlabs_agent, cx)
         });
@@ -11665,7 +11698,7 @@ yardr.dev
                 "EU-only processing",
                 "no audio archive",
                 "owner-only on Unix",
-                "no microphone opens and no key is read",
+                "Test connection explicitly reads the stored key",
             ] {
                 assert!(text.contains(required), "missing {required}: {text}");
             }
@@ -11758,13 +11791,129 @@ yardr.dev
         });
 
         // A fresh window reads the files as a restarted app does. The key
-        // field stays empty: only an explicit session start reads a key.
+        // field stays empty: the stored indicator exposes only a masked ending.
         let (again, cx) = opened_kept(&yard, &file, app);
         again.read_with(cx, |v, cx| {
             assert_eq!(v.settings.voice_provider, Provider::ElevenLabs);
             assert_eq!(v.elevenlabs_agent.read(cx).text(), "agent-offline");
             assert_eq!(v.elevenlabs_voice.read(cx).text(), "voice-offline");
             assert_eq!(v.voice_key.read(cx).text(), "");
+        });
+    }
+
+    #[gpui::test]
+    fn elevenlabs_settings_confirm_saves_and_test_stored_values(app: &mut TestAppContext) {
+        use crate::voice::{Provider, elevenlabs::stand_in::CheckSite};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        app.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, app);
+        let config = crate::fake::Agent::new().config.lock().unwrap().clone();
+        let site = Arc::new(CheckSite::new(vec![
+            (200, serde_json::json!({})),
+            (200, config),
+            (200, serde_json::json!({"voice_id": "voice_test"})),
+        ]));
+        view.update(cx, |v, _| {
+            v.means.check_agent =
+                Arc::new(move |file, agent, voice| site.check(file, agent, voice));
+            v.means.agent =
+                Rc::new(|_, _, _, _, _, _, _| panic!("diagnostics must not start a session"));
+            v.means.devices = Arc::new(|_, _, _| panic!("diagnostics must not open audio"));
+        });
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section voice");
+        click_on(cx, "voice provider ElevenLabs Agent");
+        assert!(view.read_with(cx, |v, _| v.elevenlabs_key == "No key stored"));
+        click_on(cx, "voice key");
+        cx.simulate_input("fake-check-secret");
+        click_on(cx, "voice save");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.voice_key.read(cx).text(), "");
+            assert!(v.voice_said.as_ref().unwrap().contains("Key saved"));
+            assert_eq!(v.elevenlabs_key, "Key stored (ends …cret)");
+            assert!(!v.voice_said.as_ref().unwrap().contains("fake-check"));
+        });
+        click_on(cx, "elevenlabs agent ID");
+        cx.simulate_input("agent_test");
+        click_on(cx, "elevenlabs voice ID");
+        cx.simulate_input("voice_test");
+        click_on(cx, "elevenlabs test");
+        assert!(view.read_with(cx, |v, _| v.elevenlabs_test.is_none()));
+        click_on(cx, "elevenlabs save");
+        assert!(view.read_with(cx, |v, _| {
+            v.elevenlabs_saved.as_ref().unwrap().contains("IDs saved")
+        }));
+        click_on(cx, "elevenlabs test");
+        wait(cx, "stored configuration checked", |cx| {
+            view.read_with(cx, |v, _| {
+                v.elevenlabs_test
+                    .as_ref()
+                    .is_some_and(|(_, _, result)| result.is_some())
+            })
+        });
+        view.read_with(cx, |v, _| {
+            let checks = v.elevenlabs_test.as_ref().unwrap().2.as_ref().unwrap();
+            assert_eq!(checks.key, "ok");
+            assert_eq!(checks.agent, "ok");
+            assert_eq!(checks.voice, "ok");
+            assert!(!v.settings.voice);
+            assert!(v.voice.is_none());
+        });
+        assert!(drawn(cx, "elevenlabs test result"));
+        // An edit and its reversal still make an older result stale.
+        let generation = view.read_with(cx, |v, _| v.elevenlabs_generation);
+        click_on(cx, "elevenlabs agent ID");
+        cx.simulate_input("_edited");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.elevenlabs_test.is_none()));
+        view.update(cx, |v, cx| {
+            v.elevenlabs_agent
+                .update(cx, |line, cx| line.set_text("agent_test", cx));
+            v.checked_elevenlabs(
+                generation,
+                crate::voice::elevenlabs::Checks {
+                    key: "old".into(),
+                    agent: "old".into(),
+                    voice: "old".into(),
+                },
+                cx,
+            );
+            assert!(v.elevenlabs_test.is_none());
+        });
+        // A failed save is visible, and retrying unchanged in-memory IDs
+        // succeeds once the store can be written again.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        click_on(cx, "elevenlabs save");
+        assert!(view.read_with(cx, |v, _| {
+            v.elevenlabs_saved.as_ref().unwrap().contains("not saved")
+        }));
+        std::fs::remove_dir(&file).unwrap();
+        click_on(cx, "elevenlabs save");
+        assert!(view.read_with(cx, |v, _| {
+            v.elevenlabs_saved.as_ref().unwrap().contains("IDs saved")
+        }));
+        // The masked status survives reopening the application.
+        let (again, cx) = opened_kept(&yard, &file, app);
+        again.read_with(cx, |v, _| {
+            assert_eq!(v.elevenlabs_key, "Key stored (ends …cret)")
+        });
+        // A failed key save cannot claim success or expose its typed value.
+        let key_file = file.with_file_name(Provider::ElevenLabs.key_file());
+        std::fs::remove_file(&key_file).unwrap();
+        std::fs::create_dir(&key_file).unwrap();
+        again.update(cx, |v, cx| {
+            v.voice_key
+                .update(cx, |line, cx| line.set_text("fake-another-secret", cx));
+            v.submit_voice_key(cx);
+            assert!(!v.voice_said.as_ref().unwrap().contains("Key saved"));
+            assert!(!v.voice_said.as_ref().unwrap().contains("fake-another"));
         });
     }
 

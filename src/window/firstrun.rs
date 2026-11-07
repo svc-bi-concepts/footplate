@@ -60,6 +60,10 @@ pub type Starts = Rc<dyn Fn(bool, Option<&Path>, &str, &str, mpsc::Sender<Update
 pub type AgentStarts =
     Rc<dyn Fn(bool, Option<&Path>, &str, &str, &str, &str, mpsc::Sender<Update>) -> Start>;
 
+/// Checks stored Agent credentials and IDs without starting a session.
+pub(crate) type AgentCheck =
+    Arc<dyn Fn(Option<&Path>, &str, &str) -> crate::voice::elevenlabs::Checks + Send + Sync>;
+
 /// Opens the microphone and the speaker for a session ([`crate::audio::open`]):
 /// the microphone's frames go to the session, the speaker plays its queue.
 /// The microphone is the one the settings keep the id of, empty for the
@@ -108,6 +112,7 @@ pub struct Means {
     /// sessions against a stand-in for OpenAI's socket, with stand-in devices.
     pub voice: Starts,
     pub agent: AgentStarts,
+    pub(crate) check_agent: AgentCheck,
     pub devices: Plugs,
     pub inputs: Lists,
     pub now: Clock,
@@ -156,6 +161,10 @@ impl Means {
             agent: Rc::new(crate::voice::elevenlabs::start_session),
             #[cfg(test)]
             agent: Rc::new(|_, _, _, _, _, _, _| Start::Refused("no Agent in a test".into())),
+            #[cfg(not(test))]
+            check_agent: Arc::new(crate::voice::elevenlabs::test_connection),
+            #[cfg(test)]
+            check_agent: Arc::new(|_, _, _| panic!("a connection test must use a stub")),
             #[cfg(not(test))]
             devices: Arc::new(|mic, speaker, microphone| {
                 let devices = crate::audio::open(
