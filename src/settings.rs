@@ -4,8 +4,9 @@
 //! configuration: `~/Library/Application Support/footplate/settings.json`
 //! on macOS, `%APPDATA%\footplate\settings.json` on Windows,
 //! `$XDG_CONFIG_HOME/footplate/settings.json` elsewhere (`~/.config` when
-//! that is not set). It is footplate's to write, on every change; a file
-//! that is missing or that it cannot read is today's look.
+//! that is not set). It is footplate's to write, on every change; recovery
+//! from missing or partly unreadable settings is described in
+//! `docs/window.md` under Settings.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
