@@ -448,8 +448,11 @@ They are kept in one file footplate writes on every change:
 on macOS otherwise, and `~/.config/footplate/settings.json` on Linux
 otherwise; on Windows `%APPDATA%\footplate\settings.json`, and nothing
 else. A relative `XDG_CONFIG_HOME` is ignored. Without the file, or
-with one footplate cannot read, the window is as it was before there were
-settings: 14 pixels, auto.
+with one footplate cannot read as a JSON object, the window uses the
+defaults: 14 pixels, auto. In a readable object, unknown fields are ignored
+and invalid fields fall back to their defaults; the other choices are kept.
+Older files use defaults for missing settings. An unknown voice provider
+turns voice off, so it cannot start a different provider by default.
 
 ## About
 
