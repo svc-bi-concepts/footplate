@@ -674,9 +674,9 @@ saving an image to disk, or resizing one that is over the cap.
 ## ElevenLabs Agent template
 
 Apply this manually in your own workspace before starting an Agent session.
-Footplate reads this agent's configuration only on explicit start; it creates
-or modifies no account agent. Live language quality and workspace settings
-still need commissioning; tests use a fake provider, not a model.
+For configuration checks and connection testing, see [Voice settings](#settings).
+Footplate creates or modifies no account agent. Live language quality and
+workspace settings still need commissioning; tests use a fake provider, not a model.
 
 - Require authentication. Choose a German/English-capable voice; enable German
   and English language switching and interruptions. Try Swiss German during
