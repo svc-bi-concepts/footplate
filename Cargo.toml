@@ -81,8 +81,8 @@ cpal = "=0.18.2"
 # features of the same crates, and no crate more.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSButton", "NSCell", "NSControl", "NSDockTile", "NSEvent", "NSGraphicsContext", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSError", "NSGeometry", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSButton", "NSCell", "NSControl", "NSDockTile", "NSEvent", "NSGraphicsContext", "NSImage", "NSMenu", "NSMenuItem", "NSPasteboard", "NSBitmapImageRep", "NSImageRep", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSDictionary", "NSURL", "NSError", "NSGeometry", "NSString"] }
 # A notification of the system's (notify.rs) goes through the user
 # notifications framework, whose answers come to blocks. block2 is in
 # gpui's tree already; the framework's bindings are the one crate footplate

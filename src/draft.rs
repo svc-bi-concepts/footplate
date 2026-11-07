@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::model;
 
-/// What a file from the clipboard is called: it has no name of its own.
+/// What an unnamed clipboard image is called; Finder files keep their names.
 const PASTED: &str = "what was pasted";
 
 /// Something pasted or dropped, before it is attached.
@@ -906,6 +906,30 @@ impl Drafts {
         id
     }
 
+    #[cfg(any(target_os = "macos", test))]
+    pub fn replace(&mut self, id: u64, mut found: Found, max: Option<u64>) -> bool {
+        for draft in self.all_mut() {
+            let count = draft.attachments.len();
+            if let Some(attachment) = draft.attachments.iter_mut().find(|a| a.id == id) {
+                if found.refused.is_none()
+                    && let Some(max) = max
+                    && count as u64 > max
+                {
+                    found.refused = Some(one_too_many(&found.name, count.saturating_sub(1), max));
+                }
+                *attachment = Attachment {
+                    id,
+                    name: found.name,
+                    bytes: found.bytes,
+                    size: found.size,
+                    refused: found.refused,
+                };
+                return true;
+            }
+        }
+        false
+    }
+
     /// Takes the attachment `id` off whichever draft has it: an id is its
     /// attachment's alone, in whichever yard.
     pub fn remove(&mut self, id: u64) -> bool {
@@ -979,6 +1003,49 @@ mod tests {
 
     fn ids(drafts: &Drafts, with: &str) -> Vec<u64> {
         drafts.attachments(with).iter().map(|a| a.id).collect()
+    }
+
+    #[test]
+    fn completing_an_attachment_preserves_its_place_and_removal() {
+        let mut drafts = Drafts::default();
+        drafts.turn_to("first");
+        let id = drafts.attach("yardmaster", pasted(Vec::new()));
+        let next = drafts.attach("yardmaster", pasted(vec![2]));
+        drafts.turn_to("second");
+        assert!(drafts.replace(id, pasted(vec![1]), None));
+        assert!(drafts.attachments("yardmaster").is_empty());
+        drafts.turn_to("first");
+        assert_eq!(ids(&drafts, "yardmaster"), [id, next]);
+        assert_eq!(drafts.attachments("yardmaster")[0].bytes, [1]);
+        assert!(drafts.remove(id));
+        assert!(!drafts.replace(id, pasted(vec![3]), None));
+        assert_eq!(ids(&drafts, "yardmaster"), [next]);
+    }
+
+    #[test]
+    fn completing_an_attachment_checks_its_current_owning_draft_count() {
+        let mut drafts = Drafts::default();
+        drafts.turn_to("first");
+        let first = drafts.attach("yardmaster", pasted(vec![1]));
+        let pending = drafts.attach("yardmaster", pasted(Vec::new()));
+        drafts.turn_to("second");
+        assert!(drafts.replace(pending, pasted(vec![2]), Some(1)));
+        drafts.turn_to("first");
+        assert!(drafts.attachments("yardmaster")[1].refused.is_some());
+        assert!(drafts.remove(first));
+        drafts.turn_to("second");
+        drafts.attach("yardmaster", pasted(vec![3]));
+        drafts.attach("yardmaster", pasted(vec![4]));
+        assert!(drafts.replace(pending, pasted(vec![2]), Some(1)));
+        drafts.turn_to("first");
+        assert_eq!(drafts.attachments("yardmaster")[0].refused, None);
+        let mut too_large = pasted(vec![2]);
+        too_large.refused = Some("over the byte cap".into());
+        assert!(drafts.replace(pending, too_large, Some(0)));
+        assert_eq!(
+            drafts.attachments("yardmaster")[0].refused.as_deref(),
+            Some("over the byte cap")
+        );
     }
 
     #[test]

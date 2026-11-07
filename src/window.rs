@@ -659,13 +659,11 @@ impl Footplate {
         // The title in the window's options reaches a macOS and an X11
         // window; a Wayland one has only what is set on it.
         window.set_window_title(crate::NAME);
-        let line = cx.new(Line::new);
+        let line = cx.new(Line::composer);
         cx.subscribe(&line, |this, _, _: &Submitted, cx| this.send(cx))
             .detach();
-        cx.subscribe(&line, |this, _, pasted: &Pasted, cx| {
-            this.paste(&pasted.0, cx)
-        })
-        .detach();
+        cx.subscribe(&line, |this, _, pasted: &Pasted, cx| this.paste(pasted, cx))
+            .detach();
         cx.subscribe(&line, |this, _, _: &Emptied, cx| this.remove_last(cx))
             .detach();
         let secret = cx.new(Line::masked);
@@ -2070,6 +2068,110 @@ mod tests {
         // The mail was asked for once and nothing else went: none to the
         // crew, and the text not on its own.
         assert_eq!(yard.calls(), ["Settings", "PutBlob", "MailPeer"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn native_pasted_images_are_attached_and_sent_to_the_yard(cx: &mut TestAppContext) {
+        use input::clipboard::Content;
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "image/png", "bytes": 70}}).to_string(),
+        );
+        cx.update(input::bind_keys);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the conversation", |cx| {
+            view.read_with(cx, |v, _| v.open().is_some())
+        });
+        yard.answer(
+            "Settings",
+            r#"{"result": {"operator": "jo", "files_max": "1"}}"#,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("screenshot.png");
+        std::fs::write(&path, png()).unwrap();
+        for (index, content, name) in [
+            (0, Content::Bytes(png()), PASTED),
+            (1, Content::File(path), "screenshot.png"),
+        ] {
+            cx.simulate_input("Like this.");
+            let first = view.update(cx, |v, cx| {
+                let (with, _) = v.open().unwrap();
+                v.attach(&with, crate::draft::pasted(png()), cx)
+            });
+            view.update(cx, |v, cx| {
+                v.line.update(cx, |_, cx| cx.emit(Pasted::Native(content)));
+            });
+            assert_eq!(attached(&view, cx).len(), 2);
+            view.update(cx, |v, cx| v.remove(first, cx));
+            view.update(cx, |v, cx| v.send(cx));
+            assert_eq!(yard.asked("Mail").len(), index);
+            assert_eq!(typed(&view, cx), "Like this.");
+            wait(cx, "the ready native attachment", |cx| {
+                attached(&view, cx)
+                    .iter()
+                    .any(|(_, _, refused)| refused.is_none())
+            });
+            cx.simulate_keystrokes("enter");
+            wait(cx, "the image mail", |_| {
+                yard.asked("Mail").len() == index + 1
+            });
+            assert_eq!(
+                yard.asked("Mail")[index],
+                json!({"to": "yardmaster", "text": "Like this.", "actor": "jo", "files": [{"hash": HASH, "name": name}]})
+            );
+            wait(cx, "the empty draft", |cx| attached(&view, cx).is_empty());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn native_pasted_images_retry_unknown_limits_at_send(cx: &mut TestAppContext) {
+        use input::clipboard::Content;
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let mut bytes = png();
+        bytes.resize(api::BLOB_MAX_BYTES as usize + 1, 0);
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "image/png", "bytes": bytes.len()}})
+                .to_string(),
+        );
+        cx.update(input::bind_keys);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the conversation", |cx| {
+            view.read_with(cx, |v, _| v.open().is_some())
+        });
+        yard.answer(
+            "Settings",
+            r#"{"result": {"operator": "jo", "blob_max_bytes": "16777216"}}"#,
+        );
+        yard.answer_once_status("Settings", 503, "unavailable");
+        view.update(cx, |v, cx| {
+            v.line
+                .update(cx, |_, cx| cx.emit(Pasted::Native(Content::Bytes(bytes))))
+        });
+        wait(cx, "the image ready without limits", |cx| {
+            attached(&view, cx) == [(1, PASTED.into(), None)]
+        });
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the image mailed with recovered settings", |_| {
+            !yard.asked("Mail").is_empty()
+        });
+        assert_eq!(
+            yard.asked("Mail")[0],
+            json!({"to": "yardmaster", "text": "", "actor": "jo", "files": [{"hash": HASH, "name": PASTED}]})
+        );
     }
 
     #[gpui::test]
