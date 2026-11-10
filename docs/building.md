@@ -18,9 +18,9 @@ Rust, stable (`rustup default stable`), and what gpui needs of the system:
   software one will do) and ALSA's library, `libasound.so.2` (Debian's
   `libasound2t64`), which the program is linked to: without it footplate does
   not start at all, voice on or off, and the archive does not carry it.
-  The yard runs on a Mac and so does the gate: the Linux build is tried by
-  hand, in a container (Debian 13, arm64) under Xvfb and under a headless
-  sway.
+  The yard's landing gate runs on a Mac; Linux CI is described below.
+  The Linux window is tried by hand, in a container (Debian 13, arm64)
+  under Xvfb and under a headless sway.
 - Windows: the MSVC toolchain (`rustup default stable-x86_64-pc-windows-msvc`)
   and the Visual Studio Build Tools with the C++ workload, which bring the
   linker and the Windows SDK (gpui embeds a manifest with its resource
@@ -29,13 +29,26 @@ Rust, stable (`rustup default stable`), and what gpui needs of the system:
   `GPUI_FXC_PATH` names if the build does not find it. The jobs in
   `.github/workflows/windows.yml` run `cargo build` and `cargo test` on a
   `windows-latest` runner when a release asks, or by hand, and build the
-  release's zip there (below); the gate runs on a Mac and tries no Windows.
+  release's zip there (below); the depot gate tries no Windows.
+
+Linux CI lives in the private `svc-bi-concepts/footplate-ci` mirror:
+`.github/workflows/hetzner-ci.yml` runs on pushes only, on self-hosted
+Hetzner runners, and runs the depot gate (`sh .yardr/test`). Those runners
+need the Linux build dependencies above; the workflow requests stable Rust
+with rustfmt and Clippy. Public Actions stay off; this Linux workflow uses
+no GitHub-hosted runners. The local no-mistakes run does not wait for mirror
+CI (`.no-mistakes.yaml`).
+
+Two clipboard tests in `src/window.rs` are macOS-only and remain for
+yardmaster follow-up on a Mac: `native_pasted_images_are_attached_and_sent_to_the_yard`
+and `native_pasted_images_retry_unknown_limits_at_send`. Linux CI does not
+exercise them.
 
 gpui is the release on crates.io, pinned exactly in `Cargo.toml`, and
 `Cargo.lock` is committed: the gate builds with `--locked`. `Cargo.toml`
 holds libc below 0.2.190, which footplate does not use itself: with that
-release a crate in gpui's tree no longer builds on Linux, and the gate, on
-a Mac, would not say so.
+release a crate in gpui's tree no longer builds on Linux, and the Mac's
+landing gate would not say so.
 
 Compiling gpui's tree takes a while, and every fresh worktree would pay it
 again. The gate keeps the built dependencies of a worktree that passed it,
