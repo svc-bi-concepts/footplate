@@ -215,4 +215,49 @@ age "$tmp/f"
 said f "Compiling dep " || fail "a clean that failed after the first kept the seed"
 ok "a clean that fails after the first drops the seed"
 
+# The cache may be a link to another volume, as the yard keeps it on the
+# mini's SSD: a gate reads it through the link and replaces what the link
+# points to, beside it, and the link stays. $tmp/ssd stands for the volume.
+cache=$HOME/.cache/footplate-warm-target
+# Whether the cache is a link to $1 with the build of the worktree $2 in it,
+# and nothing of the cache is a real directory in the home.
+linked_to() {
+    [ -L "$cache" ] || fail "the gate in $2 replaced the link with a directory"
+    [ "$(readlink "$cache")" = "$1" ] || fail "the gate in $2 changed the link to $(readlink "$cache")"
+    [ "$(cat "$cache/from")" = "$tmp/$2" ] || fail "the cache behind the link is not $2's build"
+    [ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate in $2 left a directory of the cache in the home"
+}
+mkdir -p "$tmp/ssd/cache"
+mv "$cache" "$tmp/ssd/cache/footplate-warm-target"
+ln -s "$tmp/ssd/cache/footplate-warm-target" "$cache"
+make_tree "$tmp/g"
+age "$tmp/g"
+gate_in g g
+! said g "Compiling dep " || fail "a worktree was not seeded through the link"
+linked_to "$tmp/ssd/cache/footplate-warm-target" g
+ok "a cache that is a link is read through it and stays a link"
+
+# A link may name its target from the link's own directory.
+rm "$cache"
+ln -s ../../ssd/cache/footplate-warm-target "$cache"
+make_tree "$tmp/h"
+age "$tmp/h"
+gate_in h h
+! said h "Compiling dep " || fail "a worktree was not seeded through a relative link"
+linked_to ../../ssd/cache/footplate-warm-target h
+ok "a cache that is a relative link stays the same link"
+
+# A link to a volume that is not mounted: the gate runs without the cache and
+# makes nothing where the volume would be, which is the internal disk.
+rm "$cache"
+ln -s "$tmp/gone/cache/footplate-warm-target" "$cache"
+make_tree "$tmp/i"
+age "$tmp/i"
+gate_in i i
+said i "Compiling dep " || fail "a worktree was seeded from a link to nothing"
+[ ! -e "$tmp/gone" ] || fail "the gate made the missing volume's directory"
+[ "$(readlink "$cache")" = "$tmp/gone/cache/footplate-warm-target" ] || fail "the gate changed a link to nothing"
+[ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
+ok "a link to a missing volume switches the cache off"
+
 echo "test-gate.sh: pass ($n cases)"

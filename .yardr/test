@@ -13,6 +13,26 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # footplate itself. Every step of that may fail, and then the build runs as
 # it would without the cache.
 warm="$HOME/.cache/footplate-warm-target"
+# The cache may be a link to another volume (the yard keeps build caches on
+# the mini's SSD, off the internal disk): work beside what it points to, so
+# the lock, the copy and the swap below all happen on that volume and the
+# link stays a link. A link whose target's directory is missing (the volume
+# not mounted) switches the cache off: making that directory would put the
+# cache on the internal disk, under the mount point.
+warm_off=
+links=0
+while [ -L "$warm" ] && [ "$links" -lt 10 ]; do
+    links=$((links + 1))
+    link=$(readlink "$warm") || break
+    case $link in
+        /*) warm=$link ;;
+        *) warm=$(dirname "$warm")/$link ;;
+    esac
+done
+if [ "$links" -gt 0 ] && { [ -L "$warm" ] || [ ! -d "$(dirname "$warm")" ]; }; then
+    echo "warm cache: $(dirname "$warm") is missing, so the gate runs without the cache" >&2
+    warm_off=1
+fi
 warm_lock="$warm.lock"
 # A lock of mkdir, which either happens or does not: hold it while the
 # cache is read or replaced, so no worktree reads a half-written copy.
@@ -60,7 +80,7 @@ clean_footplate() {
     cargo "$@"
 }
 seeded=
-if [ -z "$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ] && [ ! -e target/.rustc_info.json ] && [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
+if [ -z "$warm_off$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ] && [ ! -e target/.rustc_info.json ] && [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
     if warm_lock; then
         if [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
             rm -rf target
@@ -133,7 +153,7 @@ cargo build --locked
 # worktree. The cache is built aside and moved into place under the lock,
 # so a reader never sees a half-written copy, and a failure here must not
 # fail the gate.
-if [ -z "$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ]; then
+if [ -z "$warm_off$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ]; then
     if warm_lock; then
         rm -rf "$warm.tmp" || true
         if mkdir -p "$warm.tmp" 2>/dev/null && warm_copy target "$warm.tmp/target" 2>/dev/null; then
