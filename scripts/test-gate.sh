@@ -215,4 +215,99 @@ age "$tmp/f"
 said f "Compiling dep " || fail "a clean that failed after the first kept the seed"
 ok "a clean that fails after the first drops the seed"
 
+# The cache may be a link to another volume, as the yard keeps it on the
+# mini's SSD: a gate reads it through the link and replaces what the link
+# points to, beside it, and the link stays. $tmp/ssd stands for the volume.
+cache=$HOME/.cache/footplate-warm-target
+# Whether the cache is a link to $1 with the build of the worktree $2 in it,
+# and nothing of the cache is a real directory in the home.
+linked_to() {
+    [ -L "$cache" ] || fail "the gate in $2 replaced the link with a directory"
+    [ "$(readlink "$cache")" = "$1" ] || fail "the gate in $2 changed the link to $(readlink "$cache")"
+    [ "$(cat "$cache/from")" = "$tmp/$2" ] || fail "the cache behind the link is not $2's build"
+    [ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate in $2 left a directory of the cache in the home"
+}
+mkdir -p "$tmp/ssd/cache"
+mv "$cache" "$tmp/ssd/cache/footplate-warm-target"
+ln -s "$tmp/ssd/cache/footplate-warm-target" "$cache"
+make_tree "$tmp/g"
+age "$tmp/g"
+gate_in g g
+! said g "Compiling dep " || fail "a worktree was not seeded through the link"
+linked_to "$tmp/ssd/cache/footplate-warm-target" g
+ok "a cache that is a link is read through it and stays a link"
+
+# A link may name its target from the link's own directory.
+rm "$cache"
+ln -s ../../ssd/cache/footplate-warm-target "$cache"
+make_tree "$tmp/h"
+age "$tmp/h"
+gate_in h h
+! said h "Compiling dep " || fail "a worktree was not seeded through a relative link"
+linked_to ../../ssd/cache/footplate-warm-target h
+ok "a cache that is a relative link stays the same link"
+
+# A link may name its target with slashes after it, as a shell completes a
+# directory: the cache is still replaced beside the target, not inside it.
+rm "$cache"
+ln -s "$tmp/ssd/cache/footplate-warm-target//" "$cache"
+make_tree "$tmp/h2"
+age "$tmp/h2"
+gate_in h2 h2
+! said h2 "Compiling dep " || fail "a worktree was not seeded through a link with a slash after it"
+linked_to "$tmp/ssd/cache/footplate-warm-target//" h2
+[ -z "$(find "$tmp/ssd/cache/footplate-warm-target" -mindepth 1 -maxdepth 1 -name '.*')" ] || fail "the gate worked inside the target of a link with a slash after it"
+ok "a cache that is a link with a slash after it is replaced beside its target"
+
+# A link to a volume that is not mounted: the gate runs without the cache and
+# makes nothing where the volume would be, which is the internal disk.
+rm "$cache"
+ln -s "$tmp/gone/cache/footplate-warm-target" "$cache"
+make_tree "$tmp/i"
+age "$tmp/i"
+gate_in i i
+said i "Compiling dep " || fail "a worktree was seeded from a link to nothing"
+said i "warm cache: $tmp/gone/cache is missing" || fail "the gate did not say why it ran without the cache"
+[ ! -e "$tmp/gone" ] || fail "the gate made the missing volume's directory"
+[ "$(readlink "$cache")" = "$tmp/gone/cache/footplate-warm-target" ] || fail "the gate changed a link to nothing"
+[ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
+ok "a link to a missing volume switches the cache off"
+
+# Links that lead round to themselves never name a directory: the gate runs
+# without the cache and leaves them as they are.
+rm "$cache"
+ln -s "$cache.loop" "$cache"
+ln -s "$cache" "$cache.loop"
+make_tree "$tmp/j"
+age "$tmp/j"
+gate_in j j
+said j "Compiling dep " || fail "a worktree was seeded through links that do not end"
+said j "do not end, so the gate runs without the cache" || fail "the gate did not say the links do not end"
+[ "$(readlink "$cache")" = "$cache.loop" ] || fail "the gate changed links that do not end"
+[ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
+ok "links that do not end switch the cache off"
+
+# The volume may go while the gate builds: the refresh after it makes nothing
+# where the volume was, and the gate still passes. A cargo in $tmp/bin takes
+# the volume away once the gate's last build is done.
+rm "$cache" "$cache.loop"
+mkdir -p "$tmp/vol/cache"
+ln -s "$tmp/vol/cache/footplate-warm-target" "$cache"
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/cargo" <<EOF
+#!/bin/sh
+"$real_cargo" "\$@" || exit
+if [ "\$1" = build ]; then
+    rm -rf "$tmp/vol"
+fi
+EOF
+chmod +x "$tmp/bin/cargo"
+make_tree "$tmp/k"
+(PATH=$tmp/bin:$PATH && gate_in k k)
+said k "warm cache: $tmp/vol/cache is missing, so the gate leaves the cache as it was" || fail "the gate did not say why it left the cache"
+[ ! -e "$tmp/vol" ] || fail "the gate made the directory of a volume that went"
+[ "$(readlink "$cache")" = "$tmp/vol/cache/footplate-warm-target" ] || fail "the gate changed the link to a volume that went"
+[ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
+ok "a volume that goes during the gate is not made again"
+
 echo "test-gate.sh: pass ($n cases)"

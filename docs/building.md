@@ -44,6 +44,12 @@ copy, compiling only footplate itself. Deleting that directory loses
 nothing but time: the next gate run builds from nothing and leaves a fresh
 copy behind it.
 
+That path may be a link to a directory on another volume, as the yard keeps
+its build caches off the internal disk: the gate then reads and replaces the
+directory the link names, beside it, and the link stays. A link to a
+directory whose parent is missing (the volume not mounted), or links that do
+not end, leave the cache alone, and the gate runs without it.
+
 A build of your own has no installer. The binary is the application, so copy
 it where you like and run it. A release is installed as
 [Installing](../README.md#installing) says.
