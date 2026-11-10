@@ -1,0 +1,31 @@
+name: Hetzner CI
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: footplate-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux gate
+    runs-on: [self-hosted, hetzner]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Run depot gate
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/footplate-target
+        run: sh .yardr/test
+      - name: Remove build output
+        if: always()
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/footplate-target
+        run: rm -rf "$CARGO_TARGET_DIR"

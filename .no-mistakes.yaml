@@ -1,4 +1,4 @@
-# The fork's local gate is authoritative; it runs no GitHub CI.
+# The local gate does not wait for mirror CI; see docs/building.md.
 commands:
   test: 'sh .yardr/test'
 no_ci: true
