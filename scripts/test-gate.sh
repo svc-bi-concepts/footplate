@@ -260,4 +260,17 @@ said i "Compiling dep " || fail "a worktree was seeded from a link to nothing"
 [ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
 ok "a link to a missing volume switches the cache off"
 
+# Links that lead round to themselves never name a directory: the gate runs
+# without the cache and leaves them as they are.
+rm "$cache"
+ln -s "$cache.loop" "$cache"
+ln -s "$cache" "$cache.loop"
+make_tree "$tmp/j"
+age "$tmp/j"
+gate_in j j
+said j "Compiling dep " || fail "a worktree was seeded through links that do not end"
+[ "$(readlink "$cache")" = "$cache.loop" ] || fail "the gate changed links that do not end"
+[ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
+ok "links that do not end switch the cache off"
+
 echo "test-gate.sh: pass ($n cases)"

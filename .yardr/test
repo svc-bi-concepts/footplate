@@ -29,7 +29,10 @@ while [ -L "$warm" ] && [ "$links" -lt 10 ]; do
         *) warm=$(dirname "$warm")/$link ;;
     esac
 done
-if [ "$links" -gt 0 ] && { [ -L "$warm" ] || [ ! -d "$(dirname "$warm")" ]; }; then
+if [ -L "$warm" ]; then
+    echo "warm cache: the links from $HOME/.cache/footplate-warm-target do not end, so the gate runs without the cache" >&2
+    warm_off=1
+elif [ "$links" -gt 0 ] && [ ! -d "$(dirname "$warm")" ]; then
     echo "warm cache: $(dirname "$warm") is missing, so the gate runs without the cache" >&2
     warm_off=1
 fi
