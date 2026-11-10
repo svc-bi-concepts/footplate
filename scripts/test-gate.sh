@@ -275,4 +275,27 @@ said j "do not end, so the gate runs without the cache" || fail "the gate did no
 [ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
 ok "links that do not end switch the cache off"
 
+# The volume may go while the gate builds: the refresh after it makes nothing
+# where the volume was, and the gate still passes. A cargo in $tmp/bin takes
+# the volume away once the gate's last build is done.
+rm "$cache" "$cache.loop"
+mkdir -p "$tmp/vol/cache"
+ln -s "$tmp/vol/cache/footplate-warm-target" "$cache"
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/cargo" <<EOF
+#!/bin/sh
+"$real_cargo" "\$@" || exit
+if [ "\$1" = build ]; then
+    rm -rf "$tmp/vol"
+fi
+EOF
+chmod +x "$tmp/bin/cargo"
+make_tree "$tmp/k"
+(PATH=$tmp/bin:$PATH && gate_in k k)
+said k "warm cache: $tmp/vol/cache is missing, so the gate leaves the cache as it was" || fail "the gate did not say why it left the cache"
+[ ! -e "$tmp/vol" ] || fail "the gate made the directory of a volume that went"
+[ "$(readlink "$cache")" = "$tmp/vol/cache/footplate-warm-target" ] || fail "the gate changed the link to a volume that went"
+[ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
+ok "a volume that goes during the gate is not made again"
+
 echo "test-gate.sh: pass ($n cases)"

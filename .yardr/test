@@ -42,7 +42,12 @@ warm_lock="$warm.lock"
 # Gives up after two minutes, and then the caller carries on without the
 # cache.
 warm_lock() {
-    mkdir -p "$(dirname "$warm_lock")" 2>/dev/null || return 1
+    if [ "$links" -eq 0 ]; then
+        mkdir -p "$(dirname "$warm_lock")" 2>/dev/null || return 1
+    elif [ ! -d "$(dirname "$warm_lock")" ]; then
+        echo "warm cache: $(dirname "$warm_lock") is missing, so the gate leaves the cache as it was" >&2
+        return 1
+    fi
     n=0
     while ! mkdir "$warm_lock" 2>/dev/null; do
         n=$((n + 1))
@@ -159,7 +164,7 @@ cargo build --locked
 if [ -z "$warm_off$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ]; then
     if warm_lock; then
         rm -rf "$warm.tmp" || true
-        if mkdir -p "$warm.tmp" 2>/dev/null && warm_copy target "$warm.tmp/target" 2>/dev/null; then
+        if mkdir "$warm.tmp" 2>/dev/null && warm_copy target "$warm.tmp/target" 2>/dev/null; then
             rm -rf "$warm.tmp/target/debug/incremental" || true
             printf '%s' "$PWD" > "$warm.tmp/from" || true
             if [ -f "$warm.tmp/from" ]; then
