@@ -15,15 +15,17 @@ jobs:
     name: Linux gate
     runs-on: [self-hosted, hetzner]
     timeout-minutes: 90
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/footplate-target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Run depot gate
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/footplate-target
         run: sh .yardr/test
       - name: Remove build output
         if: always()
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/footplate-target
         run: rm -rf "$CARGO_TARGET_DIR"
