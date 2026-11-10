@@ -24,6 +24,9 @@ links=0
 while [ -L "$warm" ] && [ "$links" -lt 10 ]; do
     links=$((links + 1))
     link=$(readlink "$warm") || break
+    while [ "$link" != / ] && [ "$link" != "${link%/}" ]; do
+        link=${link%/}
+    done
     case $link in
         /*) warm=$link ;;
         *) warm=$(dirname "$warm")/$link ;;

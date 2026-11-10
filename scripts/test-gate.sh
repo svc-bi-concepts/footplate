@@ -247,6 +247,18 @@ gate_in h h
 linked_to ../../ssd/cache/footplate-warm-target h
 ok "a cache that is a relative link stays the same link"
 
+# A link may name its target with slashes after it, as a shell completes a
+# directory: the cache is still replaced beside the target, not inside it.
+rm "$cache"
+ln -s "$tmp/ssd/cache/footplate-warm-target//" "$cache"
+make_tree "$tmp/h2"
+age "$tmp/h2"
+gate_in h2 h2
+! said h2 "Compiling dep " || fail "a worktree was not seeded through a link with a slash after it"
+linked_to "$tmp/ssd/cache/footplate-warm-target//" h2
+[ -z "$(find "$tmp/ssd/cache/footplate-warm-target" -mindepth 1 -maxdepth 1 -name '.*')" ] || fail "the gate worked inside the target of a link with a slash after it"
+ok "a cache that is a link with a slash after it is replaced beside its target"
+
 # A link to a volume that is not mounted: the gate runs without the cache and
 # makes nothing where the volume would be, which is the internal disk.
 rm "$cache"
