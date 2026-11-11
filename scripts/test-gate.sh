@@ -1,8 +1,9 @@
 #!/bin/sh
-# Tests for the warm cache of .yardr/test, the gate: a worktree seeded from
-# the cache compiles footplate from its own sources, whatever their times,
-# in every build directory the seed holds (the debug one the gate builds, a
-# release, a target's), and takes nothing but its dependencies from the seed.
+# Tests for .yardr/test, the gate: its slot on the build host, and its warm
+# cache: a worktree seeded from the cache compiles footplate from its own
+# sources, whatever their times, in every build directory the seed holds (the
+# debug one the gate builds, a release, a target's), and takes nothing but its
+# dependencies from the seed.
 # The gate is run for real in worktrees of a throwaway crate named footplate
 # (the package the gate cleans) with a dependency of its own to stand for
 # gpui's tree, and in a home of its own: nothing here compiles gpui, and the
@@ -309,5 +310,28 @@ said k "warm cache: $tmp/vol/cache is missing, so the gate leaves the cache as i
 [ "$(readlink "$cache")" = "$tmp/vol/cache/footplate-warm-target" ] || fail "the gate changed the link to a volume that went"
 [ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
 ok "a volume that goes during the gate is not made again"
+
+# On the build host a shared slot script stands at a fixed place in the home:
+# the gate hands itself to it, and its exit code is the gate's. The stand-in
+# below says what it was given and exits 7 without running the gate.
+slot=$HOME/ws_yardr/integrations/gate-slot.sh
+mkdir -p "${slot%/*}"
+cat > "$slot" <<EOF
+#!/bin/sh
+echo "slot: \$*" > "$tmp/slot.args"
+exit 7
+EOF
+# This test may itself run in a slot, which marks what it starts as held.
+rc=0
+(unset YARD_GATE_SLOT_HELD && cd "$tmp/a" && sh "$gate") > "$tmp/slot.log" 2>&1 || rc=$?
+[ "$rc" = 7 ] || fail "the gate's exit code through the slot is $rc, not 7"
+[ "$(cat "$tmp/slot.args")" = "slot: -- sh $gate" ] || fail "the slot was given '$(cat "$tmp/slot.args")'"
+ok "the gate runs itself in a slot where the slot script stands"
+
+# Inside a slot the gate goes straight on and asks for no second one.
+rm "$tmp/slot.args"
+(YARD_GATE_SLOT_HELD=1 && export YARD_GATE_SLOT_HELD && gate_in a a-held)
+[ ! -e "$tmp/slot.args" ] || fail "a gate inside a slot asked for another"
+ok "a gate inside a slot runs at once"
 
 echo "test-gate.sh: pass ($n cases)"
