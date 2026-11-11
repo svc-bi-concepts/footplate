@@ -3,6 +3,11 @@
 # it in their worktree before they hand on, and a bead lands only when it
 # exits 0 on what lands. The landing runs the copy on the base branch (main),
 # so an edit here counts once it has landed there.
+# On the build host the gate takes one of its shared gate slots first, so
+# no more gates run at once than the machine holds; elsewhere the script is
+# absent and the gate runs as it is.
+gate_slot=$HOME/ws_yardr/integrations/gate-slot.sh
+if [ -z "${YARD_GATE_SLOT_HELD:-}" ] && [ -f "$gate_slot" ]; then exec sh "$gate_slot" -- sh "$0" "$@"; fi
 set -e
 # rustup installs into the home, which the yard's processes may not have on PATH.
 export PATH="$HOME/.cargo/bin:$PATH"
