@@ -1492,6 +1492,12 @@ mod tests {
         let bytes = include_bytes!("fixtures/shot-page.png");
         cx.update(|_, cx| {
             cx.subscribe(&line, move |_, pasted: &Pasted, _| {
+                // Elsewhere than the Mac the Native arm is compiled out, which leaves one
+                // arm that clippy would have a `let` instead of.
+                #[cfg_attr(
+                    not(target_os = "macos"),
+                    allow(clippy::infallible_destructuring_match)
+                )]
                 let image = match pasted {
                     Pasted::Image(image) => image,
                     #[cfg(target_os = "macos")]

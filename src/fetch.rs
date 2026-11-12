@@ -432,17 +432,20 @@ fn login_shell(shell: &Path, within: Duration) -> Option<PathBuf> {
 /// has its own process group, so that a profile that hangs is stopped with
 /// what it started. Its output is read without waiting for the pipe to
 /// close: a profile may leave something running after the shell has ended.
-/// None for a shell that fails or takes too long, or says nothing.
+/// None for a shell that fails or takes too long, or says nothing. It is
+/// started as a program written a moment ago is, since a test's stand-in
+/// shell is one.
 #[cfg(unix)]
 fn login_shell_says(shell: &Path, ask: &str, within: Duration) -> Option<String> {
-    let mut child = Command::new(shell)
-        .args(["-l", "-c", ask])
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut child = started(
+        Command::new(shell)
+            .args(["-l", "-c", ask])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .ok()?;
     let Some(mut out) = child.stdout.take() else {
         stop_group(&mut child);
         return None;
@@ -1686,13 +1689,83 @@ mod tests {
 
         // What it started went with it.
         let sleep: i32 = fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
-        // SAFETY: signal 0 only asks whether the process is there.
-        let alive = || unsafe { libc::kill(sleep, 0) } == 0;
         let stopped = Instant::now();
-        while alive() && stopped.elapsed() < Duration::from_secs(10) {
+        while running(sleep) && stopped.elapsed() < Duration::from_secs(10) {
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(!alive());
+        assert!(!running(sleep));
+    }
+
+    /// Whether a process still runs. One that is stopped but not yet
+    /// reaped is a zombie, which `kill(pid, 0)` still finds; an orphan is
+    /// reaped by the first process of its system, and in a container whose
+    /// first process reaps nothing (a CI job's `tail -f /dev/null`) it stays
+    /// a zombie. So a zombie counts as stopped.
+    fn running(pid: i32) -> bool {
+        // SAFETY: signal 0 only asks whether the process is there.
+        (unsafe { libc::kill(pid, 0) }) == 0 && !zombie(pid)
+    }
+
+    /// The state in `/proc/<pid>/stat` is the field after the name, which
+    /// is in parentheses and may hold them itself: counted from the last.
+    #[cfg(target_os = "linux")]
+    fn zombie(pid: i32) -> bool {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let (_, rest) = stat.rsplit_once(')')?;
+                Some(rest.trim_start().starts_with('Z'))
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn zombie(pid: i32) -> bool {
+        // SAFETY: proc_bsdshortinfo is plain data, for which zeroes are valid.
+        let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+        // SAFETY: info is a live proc_bsdshortinfo of the size passed.
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdshortinfo).cast(),
+                size,
+            )
+        };
+        // The system no longer tells of a zombie (no such process) though
+        // kill still finds it.
+        match got == size {
+            true => info.pbsi_status == libc::SZOMB,
+            false => io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH),
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn zombie(_: i32) -> bool {
+        false
+    }
+
+    /// A process stopped and not reaped is no longer running, though its
+    /// pid still answers: what a container that reaps nothing leaves of
+    /// the hanging shell's `sleep`.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_stopped_process_left_unreaped_is_not_running() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        assert!(running(pid));
+        child.kill().unwrap();
+        let stopped = Instant::now();
+        while running(pid) && stopped.elapsed() < Duration::from_secs(10) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!running(pid));
+        // Not reaped yet: the pid is still there, as a zombie.
+        // SAFETY: signal 0 only asks whether the process is there.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+        child.wait().unwrap();
     }
 
     /// The installer's failures are its own words, or why it was not run,
@@ -2042,6 +2115,25 @@ mod tests {
         });
         let status = started(&mut Command::new(&script)).unwrap().wait().unwrap();
         assert_eq!(status.code(), Some(7));
+        closing.join().unwrap();
+    }
+
+    /// A login shell written a moment ago is asked once nothing writes it,
+    /// as a test's stand-in is while another test's process starts: on
+    /// Linux it was refused, and counted as a shell that said nothing.
+    #[test]
+    fn a_login_shell_written_a_moment_ago_is_asked_once_nothing_writes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = keep(dir.path(), "sh", b"#!/bin/sh\necho /usr/bin:/bin\n").unwrap();
+        let open = OpenOptions::new().append(true).open(&shell).unwrap();
+        let closing = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            drop(open);
+        });
+        assert_eq!(
+            login_shell_says(&shell, "echo $PATH", Duration::from_secs(10)).as_deref(),
+            Some("/usr/bin:/bin")
+        );
         closing.join().unwrap();
     }
 

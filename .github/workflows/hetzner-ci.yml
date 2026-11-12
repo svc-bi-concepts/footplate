@@ -1,0 +1,46 @@
+name: Hetzner CI
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: footplate-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux gate
+    runs-on: [self-hosted, hetzner]
+    timeout-minutes: 90
+    # The Hetzner runners have no C toolchain and no sudo: the gate runs in a
+    # job container, where the system libraries gpui (X11, xcb, xkbcommon,
+    # wayland, fontconfig, freetype) and cpal (ALSA) link against can be
+    # installed. The container and everything only it holds go with the job.
+    container:
+      image: rust:1-bookworm
+    env:
+      # Inside the container, not on the runner's disk: gone with the job.
+      CARGO_TARGET_DIR: /tmp/footplate-target
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake clang \
+            libasound2-dev libfontconfig-dev libfreetype-dev \
+            libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev libssl-dev libzstd-dev
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Run depot gate
+        run: sh .yardr/test
+      # The container runs as root and the runner persists: hand the
+      # workspace back to the runner's user so the next checkout can clean it.
+      - name: Return the workspace to the runner
+        if: always()
+        run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"

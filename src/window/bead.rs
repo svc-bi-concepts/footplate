@@ -951,6 +951,12 @@ impl Footplate {
         let Some((with, _)) = self.open() else {
             return;
         };
+        // Elsewhere than the Mac the Native arm is compiled out, which leaves one
+        // arm that clippy would have a `let` instead of.
+        #[cfg_attr(
+            not(target_os = "macos"),
+            allow(clippy::infallible_destructuring_match)
+        )]
         let image = match pasted {
             crate::input::Pasted::Image(image) => image,
             #[cfg(target_os = "macos")]

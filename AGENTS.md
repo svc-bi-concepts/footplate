@@ -16,9 +16,9 @@ Top level: `src/` the program, `build.rs` (the Windows stack size, nothing
 else), `scripts/` release, screenshot and shell-test helpers, `assets/`
 icons, the Linux polkit action and the Linux desktop entry, `docs/` the manual
 and `docs/design/` decision notes, `.yardr/` the yard's gate, `.github/` the
-Windows jobs (build and test, which the gate does not try, and the release's
-Windows zip), `spikes/` throwaway programs that try a provider or a dependency
-before the product takes it, each its own cargo package and its own workspace,
+CI workflows described in `docs/building.md`, `spikes/` throwaway programs
+that try a provider or a dependency before the product takes it, each its
+own cargo package and its own workspace,
 so that neither the gate nor a release sees it: `spikes/voice-harness/` is the
 GPT-Live voice session of `docs/design/2026-10-31-footplate-vqze-voice.md`, run
 by a person with a key (its `RUN.md` has the command); it is deleted when
@@ -317,9 +317,10 @@ Setup, release and tests:
   reason in a comment above the gate.
 - Gate: `.yardr/test` (`cargo fmt --check`, `clippy -D warnings`,
   `cargo test`, `cargo build`). Landing runs the base copy of that
-  script, not yours. It runs on a Mac; `.github/workflows/windows.yml`
-  runs `cargo build` and `cargo test` on Windows, and builds the release's
-  Windows zip there.
+  script, not yours. It runs on a Mac; `.github/workflows/hetzner-ci.yml`
+  runs the same script on Linux in the `footplate-ci` mirror, and
+  `.github/workflows/windows.yml` runs `cargo build` and `cargo test` on
+  Windows, and builds the release's Windows zip there.
 
 ## Do not touch
 
