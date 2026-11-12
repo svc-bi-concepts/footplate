@@ -1686,13 +1686,83 @@ mod tests {
 
         // What it started went with it.
         let sleep: i32 = fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
-        // SAFETY: signal 0 only asks whether the process is there.
-        let alive = || unsafe { libc::kill(sleep, 0) } == 0;
         let stopped = Instant::now();
-        while alive() && stopped.elapsed() < Duration::from_secs(10) {
+        while running(sleep) && stopped.elapsed() < Duration::from_secs(10) {
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(!alive());
+        assert!(!running(sleep));
+    }
+
+    /// Whether a process still runs. One that is stopped but not yet
+    /// reaped is a zombie, which `kill(pid, 0)` still finds; an orphan is
+    /// reaped by the first process of its system, and in a container whose
+    /// first process reaps nothing (a CI job's `tail -f /dev/null`) it stays
+    /// a zombie. So a zombie counts as stopped.
+    fn running(pid: i32) -> bool {
+        // SAFETY: signal 0 only asks whether the process is there.
+        (unsafe { libc::kill(pid, 0) }) == 0 && !zombie(pid)
+    }
+
+    /// The state in `/proc/<pid>/stat` is the field after the name, which
+    /// is in parentheses and may hold them itself: counted from the last.
+    #[cfg(target_os = "linux")]
+    fn zombie(pid: i32) -> bool {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let (_, rest) = stat.rsplit_once(')')?;
+                Some(rest.trim_start().starts_with('Z'))
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn zombie(pid: i32) -> bool {
+        // SAFETY: proc_bsdshortinfo is plain data, for which zeroes are valid.
+        let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+        // SAFETY: info is a live proc_bsdshortinfo of the size passed.
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdshortinfo).cast(),
+                size,
+            )
+        };
+        // The system no longer tells of a zombie (no such process) though
+        // kill still finds it.
+        match got == size {
+            true => info.pbsi_status == libc::SZOMB,
+            false => io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH),
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn zombie(_: i32) -> bool {
+        false
+    }
+
+    /// A process stopped and not reaped is no longer running, though its
+    /// pid still answers: what a container that reaps nothing leaves of
+    /// the hanging shell's `sleep`.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_stopped_process_left_unreaped_is_not_running() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        assert!(running(pid));
+        child.kill().unwrap();
+        let stopped = Instant::now();
+        while running(pid) && stopped.elapsed() < Duration::from_secs(10) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!running(pid));
+        // Not reaped yet: the pid is still there, as a zombie.
+        // SAFETY: signal 0 only asks whether the process is there.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+        child.wait().unwrap();
     }
 
     /// The installer's failures are its own words, or why it was not run,
