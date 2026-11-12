@@ -7,19 +7,19 @@
 
 [0m[38;2;166;227;161m◆ [0m[1m[38;2;204;211;219mRan 2 commands[0m[38;2;204;211;219m [0m[38;2;103;108;116m· [0m[38;2;90;160;255mRead pane read arg…[0m[38;2;103;108;116m · +1 ✓ · 0.7s[0m[2m[38;2;103;108;116m · ctrl+o[0m
 
-[0m[38;2;103;108;116m  [0m[38;2;138;144;152mRead /Users/mckean/.yardr/worktrees/footplate/footplate-6ek[0m
+[0m[38;2;103;108;116m  [0m[38;2;138;144;152mRead /Users/person/.yardr/worktrees/footplate/footplate-6ek[0m
 [0m[38;2;138;144;152mv/src/select.rs[0m
 
 [0m[38;2;166;227;161m◆ [0m[1m[38;2;204;211;219mRan 2 commands[0m[38;2;204;211;219m [0m[38;2;103;108;116m· [0m[38;2;90;160;255mSurvey screenshot …[0m[38;2;103;108;116m · +1 ✓ · 2.3s[0m[2m[38;2;103;108;116m · ctrl+o[0m
 
-[0m[38;2;103;108;116m  [0m[38;2;138;144;152mRead /Users/mckean/.yardr/worktrees/footplate/footplate-6ek[0m
+[0m[38;2;103;108;116m  [0m[38;2;138;144;152mRead /Users/person/.yardr/worktrees/footplate/footplate-6ek[0m
 [0m[38;2;138;144;152mv/src/shot.rs[0m
 
 [0m[38;2;103;108;116m  Read 2 files · 1 search[0m[2m[38;2;103;108;116m · ctrl+o[0m
 
 [0m[38;2;166;227;161m◆ [0m[1m[38;2;204;211;219mFinished[0m[38;2;204;211;219m [0m[38;2;90;160;255m· Run depot test command on base[0m[38;2;103;108;116m · ✓[0m[2m[38;2;103;108;116m · ctrl+o[0m
 
-[0m[38;2;103;108;116m  [0m[38;2;138;144;152mRead /Users/mckean/.yardr/worktrees/footplate/footplate-6ek[0m
+[0m[38;2;103;108;116m  [0m[38;2;138;144;152mRead /Users/person/.yardr/worktrees/footplate/footplate-6ek[0m
 [0m[38;2;138;144;152mv/src/window/chrome.rs[0m
 
 [0m[38;2;166;227;161m◆ [0m[1m[38;2;204;211;219mRan command[0m[38;2;204;211;219m [0m[38;2;90;160;255m· Check base test results[0m[38;2;103;108;116m · ✓ · 0.1s[0m[2m[38;2;103;108;116m · ctrl+o[0m
@@ -29,12 +29,12 @@
 
 [0m[38;2;166;227;161m◆ [0m[1m[38;2;204;211;219mRan command[0m[38;2;204;211;219m [0m[38;2;90;160;255m· Find bead call tests, vte …[0m[38;2;103;108;116m · ✓ · 1s[0m[2m[38;2;103;108;116m · ctrl+o[0m
 
-[0m[38;2;103;108;116m  [0m[38;2;138;144;152mRead /Users/mckean/.yardr/worktrees/footplate/footplate-6ek[0m
+[0m[38;2;103;108;116m  [0m[38;2;138;144;152mRead /Users/person/.yardr/worktrees/footplate/footplate-6ek[0m
 [0m[38;2;138;144;152mv/src/api.rs[0m
 
 [0m[38;2;166;227;161m◆ [0m[1m[38;2;204;211;219mRan 2 commands[0m[38;2;204;211;219m [0m[38;2;103;108;116m· [0m[38;2;90;160;255mCheck memchr in tr…[0m[38;2;103;108;116m · +1 ✓ · 0.9s[0m[2m[38;2;103;108;116m · ctrl+o[0m
 
-[0m[38;2;103;108;116m  [0m[38;2;138;144;152mRead /Users/mckean/.yardr/worktrees/footplate/footplate-6ek[0m
+[0m[38;2;103;108;116m  [0m[38;2;138;144;152mRead /Users/person/.yardr/worktrees/footplate/footplate-6ek[0m
 [0m[38;2;138;144;152mv/src/model.rs[0m
 
 [0m[1m[38;2;204;211;219m◆ [0m[38;2;204;211;219mvte adds no new transitive deps (memchr already in tree).[0m
