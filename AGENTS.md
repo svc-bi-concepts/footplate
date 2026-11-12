@@ -317,9 +317,10 @@ Setup, release and tests:
   reason in a comment above the gate.
 - Gate: `.yardr/test` (`cargo fmt --check`, `clippy -D warnings`,
   `cargo test`, `cargo build`). Landing runs the base copy of that
-  script, not yours. It runs on a Mac; `.github/workflows/windows.yml`
-  runs `cargo build` and `cargo test` on Windows, and builds the release's
-  Windows zip there.
+  script, not yours. It runs on a Mac; `.github/workflows/hetzner-ci.yml`
+  runs the same script on Linux in the `footplate-ci` mirror, and
+  `.github/workflows/windows.yml` runs `cargo build` and `cargo test` on
+  Windows, and builds the release's Windows zip there.
 
 ## Do not touch
 

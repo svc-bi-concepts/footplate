@@ -40,8 +40,8 @@ stable Rust with rustfmt and Clippy. Public Actions stay off; this Linux
 workflow uses no GitHub-hosted runners. The local no-mistakes run does not
 wait for mirror CI (`.no-mistakes.yaml`).
 
-Four tests are macOS-only, and Linux CI does not run them; they remain for
-yardmaster follow-up on a Mac:
+Four tests are macOS-only: Linux CI does not run them, and the Mac's
+landing gate does:
 `native_pasted_images_are_attached_and_sent_to_the_yard` and
 `native_pasted_images_retry_unknown_limits_at_send` (`src/window.rs`),
 `the_macs_authorization_status_is_read_as_the_consent_it_means`
