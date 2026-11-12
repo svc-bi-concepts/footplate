@@ -432,17 +432,20 @@ fn login_shell(shell: &Path, within: Duration) -> Option<PathBuf> {
 /// has its own process group, so that a profile that hangs is stopped with
 /// what it started. Its output is read without waiting for the pipe to
 /// close: a profile may leave something running after the shell has ended.
-/// None for a shell that fails or takes too long, or says nothing.
+/// None for a shell that fails or takes too long, or says nothing. It is
+/// started as a program written a moment ago is, since a test's stand-in
+/// shell is one.
 #[cfg(unix)]
 fn login_shell_says(shell: &Path, ask: &str, within: Duration) -> Option<String> {
-    let mut child = Command::new(shell)
-        .args(["-l", "-c", ask])
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut child = started(
+        Command::new(shell)
+            .args(["-l", "-c", ask])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .ok()?;
     let Some(mut out) = child.stdout.take() else {
         stop_group(&mut child);
         return None;
@@ -2112,6 +2115,25 @@ mod tests {
         });
         let status = started(&mut Command::new(&script)).unwrap().wait().unwrap();
         assert_eq!(status.code(), Some(7));
+        closing.join().unwrap();
+    }
+
+    /// A login shell written a moment ago is asked once nothing writes it,
+    /// as a test's stand-in is while another test's process starts: on
+    /// Linux it was refused, and counted as a shell that said nothing.
+    #[test]
+    fn a_login_shell_written_a_moment_ago_is_asked_once_nothing_writes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = keep(dir.path(), "sh", b"#!/bin/sh\necho /usr/bin:/bin\n").unwrap();
+        let open = OpenOptions::new().append(true).open(&shell).unwrap();
+        let closing = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            drop(open);
+        });
+        assert_eq!(
+            login_shell_says(&shell, "echo $PATH", Duration::from_secs(10)).as_deref(),
+            Some("/usr/bin:/bin")
+        );
         closing.join().unwrap();
     }
 
