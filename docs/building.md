@@ -155,9 +155,7 @@ before it opens ([Installing](../README.md#windows-pc)).
 With `FOOTPLATE_RELEASE_WINDOWS=off` in the environment the release ships
 without the Windows zip: no run is started or asked for, nothing is
 fetched, and the zip is left out of the archives and of `checksums.txt`.
-Unset or any other value, the release is as above. The release group reads
-its environment from its `env_file` (below), which is where the operator
-sets it.
+Unset or any other value, the release is as above.
 
 The macOS apps are signed ad hoc and not notarized, and the disk images not
 signed, unless the release is asked for more, and says so. With both
@@ -191,83 +189,48 @@ store-credentials`, once per Mac, are in yardr's `docs/install.md` under
 read from the login keychain: the Mac must be logged in with that keychain
 unlocked, and the key must let `codesign` use it without asking.
 
-With the yard a release bead cuts the release instead: `build` makes the
-archives and the GitHub release, `sign` asks mckean to sign the checksums,
-`verify` checks the signature, and `publish` files the yardr.dev sync bead
-(the release flow, `.yardr/flows/type/release.flow`; the script its stages
-run is `scripts/release-stage`).
+A release is cut by hand. footplate runs the yard's stored `it-ship` flow,
+which has no release stages, and its repository keeps no flow of its own; a
+stored release flow, if one is wanted, is a bead of its own. From a clean
+checkout of `main` as the remote has it, with `Cargo.toml`'s version (here
+`v0.5.0`) and the release notes in `notes.md`:
 
-    yardr bead create "footplate v0.5.0" -t release -d footplate -b - < notes.md
-    yardr bead advance <id> --to build
+1. Build the archives and `checksums.txt` with `scripts/release.sh`, as
+   above, into an out-dir of their own.
+2. Tag the commit, push the tag, and make the GitHub release from the
+   out-dir:
 
-The title's last word is the version, which must equal `Cargo.toml`'s; the
-body is the release notes as they will stand on the GitHub release. The
-yardmaster shapes the bead in `backlog`, then advances it to `build`, and
-from there:
+       git tag v0.5.0 && git push origin v0.5.0
+       gh release create v0.5.0 <out-dir>/* --repo yardr-dev/footplate \
+         --title v0.5.0 --notes-file notes.md --verify-tag
 
-- `build` refuses a bad title, a version that is not `Cargo.toml`'s, an
-  existing release or tag, a dirty tree, or a checkout that is not the
-  remote's `main`; builds the seven archives and `checksums.txt` with
-  `scripts/release.sh` (six without the Windows zip when
-  `FOOTPLATE_RELEASE_WINDOWS=off` is in the group's environment); tags the
-  base commit, pushes the tag, and makes the GitHub release; notes on the
-  bead whether the macOS apps and disk images came out signed and notarized
-  or ad hoc and unsigned, and the five signing commands.
-- `sign` asks mckean whether `checksums.txt.minisig` is uploaded. Run the
-  five commands from the build's note, in a directory of their own, then
-  Done. Each names the version, so a stale file or a wrong release shows
-  itself.
-- `verify` downloads the release, checks the signature against the release
-  key and the archives against the checksums, then checks each macOS
-  archive: each zip is unpacked and its app must be notarized (`xcrun
-  stapler validate`, and `spctl -a -vv -t exec` naming `Notarized
-  Developer ID`), and each disk image must be stapled and notarized
-  itself, mount read-only holding the app and the `Applications` link,
-  and hold a notarized app. A bad signature asks `sign` again; an app or
-  image that is not notarized, as an ad hoc release's is not, waits in
-  `decide` for the release to be remade. Off a Mac the macOS check is
-  skipped, and the note says so.
-- `publish` files the yardr.dev sync bead
-  (`scripts/sync-release footplate <version>`) and advances it to `new`;
-  the release bead is `published`.
+3. Sign the checksums with the release key, check the signature, and
+   upload it:
 
-Anything failed or questioned waits in `decide` for a person.
+       dir=~/releases/v0.5.0; mkdir -p $dir
+       gh release download v0.5.0 --repo yardr-dev/footplate --pattern checksums.txt --dir $dir --clobber
+       minisign -S -s ~/.minisign/yardr-release.key -m $dir/checksums.txt
+       minisign -V -P RWSzUPGBbv7MDqH+nnbNmYdOm20UTkuk7eC5e6XuVtYRwZtaEZRlV/WB -m $dir/checksums.txt
+       gh release upload v0.5.0 --repo yardr-dev/footplate $dir/checksums.txt.minisig --clobber
 
-Once, the yardmaster adds one exec group and four routes; from then on a
-release bead cuts the release:
+4. Check the release as it was published: download it, check the
+   archives against `checksums.txt`, and on a Mac check that each app and
+   disk image is notarized and stapled (`xcrun stapler validate`, `spctl
+   -a -vv -t exec` naming `Notarized Developer ID`). An ad hoc release's
+   are not, and are remade signed before it ships.
+5. Publish it on yardr.dev: in that repository's checkout, run
+   `scripts/sync-release footplate v0.5.0` and commit what it wrote.
 
-    yardr group add footplate-release --runner exec --limit 1 \
-      --set cmd='scripts/release-stage $YARDR_STAGE' \
-      --set log="$HOME/.yardr/logs/release-footplate.log"
-    yardr route add --stage build --group footplate-release --depot footplate
-    yardr route add --stage verify --group footplate-release --depot footplate
-    yardr route add --stage publish --group footplate-release --depot footplate
-    yardr route add --stage sign --group decisions --depot footplate
-
-The group runs the depot's own script, one release at a time; the stage in
-`cmd` says which of `build`, `verify` or `publish` it is. The build refuses
-a checkout that is not clean at the remote's `main`, so the script it runs
-is `main`'s. `sign` goes to the manual group mckean is in, whose Done says
-the signature is uploaded; `backlog` and `decide` ride the depot's existing
-routes. The group runs on a Mac, where `scripts/release.sh` builds, and
-where `jq`, `git`, `gh` (logged in) and `minisign` are.
-`scripts/release-stage` is vendored from yardr's `contrib/release/stage`
-(yardr@a3870526) with footplate's release as its default: one checkout
-holds the whole release, and no release depends on what a sibling yardr
-clone has checked out. A fix upstream is mirrored here, and a fix here
-belongs upstream too.
-
-The group runs `scripts/release.sh` as the operator, so for the macOS apps
-and disk images to come out signed and notarized it needs the two variables
-above in its environment, and the Mac logged in as that operator. An exec group takes
-them from an `env_file`, a `0600` file of `KEY=VALUE` lines the store never
-holds (yardr's `docs/groups.md`, "Outbound credentials"):
-
-    yardr group set footplate-release env_file=~/.yardr/groups/footplate-release.env
-
-Without them the release is made, with the apps signed ad hoc and the images
-unsigned. The build's note says which it was, so it shows before the
-checksums are signed.
+`scripts/release-stage` is kept for a stored release flow and is not run
+today; its build stage's signing note is where the commands of step 3 come
+from. Its
+three stages would make the archives and the GitHub release (`build`),
+check the signature, the checksums and the notarization of the release
+(`verify`), and file the yardr.dev sync bead (`publish`). It is vendored
+from yardr's `contrib/release/stage` (yardr@a3870526) with footplate's
+release as its default: one checkout holds the whole release, and no
+release depends on what a sibling yardr clone has checked out. A fix
+upstream is mirrored here, and a fix here belongs upstream too.
 
 A builder with a bead to prove takes a picture of the window with
 `scripts/shot-linux.sh`, from the worktree, after the last commit:

@@ -140,10 +140,10 @@ Rust, drawn with [gpui](https://gpui.rs/), the UI framework Zed is built on.
 
 ## How it is developed
 
-Tracked in Linear as YRD-22. Developed in a yardr yard; `.yardr/` holds its
-flow, roles and merge gate (`cargo fmt`, `clippy`, `test`, `build`). Every
-change is reviewed twice before it lands: against its bead, then for security
-alone.
+Tracked in Linear as YRD-22. Developed in a yardr yard, which runs it on
+the yard's stored `it-ship` flow; `.yardr/` holds its rules, roles and merge
+gate (`cargo fmt`, `clippy`, `test`, `build`). Every change is reviewed
+against its bead before it lands.
 
 ## Read more
 
