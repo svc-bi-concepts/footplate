@@ -263,13 +263,14 @@ Setup, release and tests:
 - Releases: `scripts/release.sh` builds and lists each archive, stopping at
   a yardr in one, `scripts/bundle-mac.sh` bundles, `scripts/release-stage`
   is kept for a stored release flow and is not run today. The Windows zip
-  is not built there: the `release` job of `.github/workflows/windows.yml` builds it, and
-  `scripts/release.sh` takes the zip of the run for `HEAD` with `gh`. A new
-  file in the Linux archive is packed in `scripts/release.sh`, listed in
-  `scripts/test-release.sh`, and added to yardr.dev's `scripts/sync-release`
-  (another repository), which refuses a member it does not know; one in the
-  Windows zip is zipped in the workflow, checked in `scripts/release.sh` and
-  `scripts/test-release.sh`, and added to `sync-release` the same way.
+  is not built there: the `release` job of `.github/workflows/windows.yml`
+  builds it, and `scripts/release.sh` takes the zip of the run for `HEAD`
+  with `gh`. A new file in the Linux archive is packed in
+  `scripts/release.sh`, listed in `scripts/test-release.sh`, and added to
+  yardr.dev's `scripts/sync-release` (another repository), which refuses a
+  member it does not know; one in the Windows zip is zipped in the
+  workflow, checked in `scripts/release.sh` and `scripts/test-release.sh`,
+  and added to `sync-release` the same way.
 
 ## Conventions
 
