@@ -1,27 +1,27 @@
 ## What this does and why
 
-<!-- Explain the problem and resulting behavior, link the full issue URL, and say how commits divide the concerns. -->
+<!-- What the PR does and why, in plain words, with the full URL, starting with the scheme, of what it answers (issue, earlier PR, decision). One commit per concern, and say so. -->
 
 ## Out of scope and unchanged
 
-<!-- What was deliberately left alone. -->
+<!-- What was left alone on purpose. -->
 
 ## Changes
 
-<!-- One subsection per change: before/after behavior, API or data affected, and tests added or replaced by name. -->
+<!-- One ### section per change: behaviour before and after, the API or data it touches, and the tests added or replaced, each by name. -->
 
 ## Screenshots
 
-<!-- For visible changes: before/after at 1440 and 390 widths, linked by evidence commit SHA. Otherwise remove this section. -->
+<!-- Only for a visible change: before | after at 1440 and 390 width, images linked by the evidence commit's sha (blob/<sha>/...?raw=true). Delete this section otherwise. -->
 
 ## Not changed, needs a decision
 
-<!-- Unresolved findings and why; write "None." when there are none. -->
+<!-- Anything found but not done, and why. "None." if nothing. -->
 
 ## Deploying
 
-<!-- Migration order and what users see during rollout. Remove when nothing deploys. -->
+<!-- Only when something deploys: migrations, their order relative to the services, what to watch. Delete this section otherwise. -->
 
 ## Checks
 
-<!-- Exact commands, counts, commit tested, environment, and what was not verified. Use synthetic data only. -->
+<!-- The gate that ran on the head of this PR and its result; what was verified by hand and what was not. -->
