@@ -1,8 +1,9 @@
 #!/bin/sh
-# release-stage: the release flow's three scripted stages. Run it as the cmd
-# of an exec group routed for build, verify and publish (one group with the
-# stage in cmd: scripts/release-stage $YARDR_STAGE); docs/building.md
-# "Building" says how a release is cut with the yard.
+# release-stage: a release flow's three scripted stages. It is kept for a
+# future stored release flow and is not run today: footplate's releases are
+# cut by hand with scripts/release.sh (docs/building.md, "Building"). Such a
+# flow would run it as the cmd of an exec group routed for build, verify and
+# publish (one group with the stage in cmd: scripts/release-stage $YARDR_STAGE).
 #
 #   scripts/release-stage <build|verify|publish>
 #
