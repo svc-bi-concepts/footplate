@@ -189,12 +189,41 @@ store-credentials`, once per Mac, are in yardr's `docs/install.md` under
 read from the login keychain: the Mac must be logged in with that keychain
 unlocked, and the key must let `codesign` use it without asking.
 
-A release is cut by hand, with `scripts/release.sh` as above. footplate
-runs the yard's stored `it-ship` flow, which has no release stages, and its
-repository keeps no flow of its own; a stored release flow, if one is
-wanted, is a bead of its own.
+A release is cut by hand. footplate runs the yard's stored `it-ship` flow,
+which has no release stages, and its repository keeps no flow of its own; a
+stored release flow, if one is wanted, is a bead of its own. From a clean
+checkout of `main` as the remote has it, with `Cargo.toml`'s version (here
+`v0.5.0`) and the release notes in `notes.md`:
 
-`scripts/release-stage` is kept for such a flow and is not run today. Its
+1. Build the archives and `checksums.txt` with `scripts/release.sh`, as
+   above, into an out-dir of their own.
+2. Tag the commit, push the tag, and make the GitHub release from the
+   out-dir:
+
+       git tag v0.5.0 && git push origin v0.5.0
+       gh release create v0.5.0 <out-dir>/* --repo yardr-dev/footplate \
+         --title v0.5.0 --notes-file notes.md --verify-tag
+
+3. Sign the checksums with the release key, check the signature, and
+   upload it:
+
+       dir=~/releases/v0.5.0; mkdir -p $dir
+       gh release download v0.5.0 --repo yardr-dev/footplate --pattern checksums.txt --dir $dir --clobber
+       minisign -S -s ~/.minisign/yardr-release.key -m $dir/checksums.txt
+       minisign -V -P RWSzUPGBbv7MDqH+nnbNmYdOm20UTkuk7eC5e6XuVtYRwZtaEZRlV/WB -m $dir/checksums.txt
+       gh release upload v0.5.0 --repo yardr-dev/footplate $dir/checksums.txt.minisig --clobber
+
+4. Check the release as it was published: download it, check the
+   archives against `checksums.txt`, and on a Mac check that each app and
+   disk image is notarized and stapled (`xcrun stapler validate`, `spctl
+   -a -vv -t exec` naming `Notarized Developer ID`). An ad hoc release's
+   are not, and are remade signed before it ships.
+5. Publish it on yardr.dev: in that repository's checkout, run
+   `scripts/sync-release footplate v0.5.0` and commit what it wrote.
+
+`scripts/release-stage` is kept for a stored release flow and is not run
+today; its build stage's signing note is where the commands of step 3 come
+from. Its
 three stages would make the archives and the GitHub release (`build`),
 check the signature, the checksums and the notarization of the release
 (`verify`), and file the yardr.dev sync bead (`publish`). It is vendored
