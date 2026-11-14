@@ -311,6 +311,56 @@ said k "warm cache: $tmp/vol/cache is missing, so the gate leaves the cache as i
 [ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
 ok "a volume that goes during the gate is not made again"
 
+# An explicit target dir, as the yard gives a bead's builds on the SSD: the gate
+# seeds it from the cache and refreshes the cache from it, the cache names the
+# directory it was built in, and the worktree gets no target/ of its own. The
+# cache is the link to $tmp/ssd again, and the targets are beside it there.
+rm "$cache"
+ln -s "$tmp/ssd/cache/footplate-warm-target" "$cache"
+# Runs the gate in the worktree $1 with the environment variable $3 set to the
+# directory $4, and keeps what it said in $tmp/$2.log.
+gate_td() {
+    (cd "$tmp/$1" && env "$3=$4" sh "$gate") > "$tmp/$2.log" 2>&1 || {
+        tail -n 40 "$tmp/$2.log" >&2
+        fail "the gate failed in $1 with $3 set"
+    }
+}
+make_tree "$tmp/m"
+age "$tmp/m"
+gate_td m m CARGO_TARGET_DIR "$tmp/ssd/cargo-target/footplate/m"
+! said m "Compiling dep " || fail "a worktree with an explicit target was not seeded"
+[ -f "$tmp/ssd/cargo-target/footplate/m/.rustc_info.json" ] || fail "the explicit target was not built on the volume"
+[ -f "$cache/target/.rustc_info.json" ] || fail "the gate with an explicit target left no cache"
+[ "$(cat "$cache/target-dir")" = "$tmp/ssd/cargo-target/footplate/m" ] || fail "the cache does not name the explicit target it was built in: $(cat "$cache/target-dir")"
+[ "$(cat "$cache/from")" = "$tmp/m" ] || fail "the cache does not name the worktree it was built in"
+[ ! -e "$tmp/m/target" ] || fail "the gate made a target/ in its worktree beside an explicit one"
+ok "a gate with an explicit target dir is seeded, and leaves the cache and its target on the volume"
+
+# A seeded explicit target builds footplate from its own sources, and its own
+# build stays as it is for the next run. CARGO_BUILD_TARGET_DIR, the other
+# variable cargo reads, is seeded the same way.
+make_tree "$tmp/n"
+add_test "$tmp/n"
+age "$tmp/n"
+gate_td n n CARGO_BUILD_TARGET_DIR "$tmp/ssd/cargo-target/footplate/n"
+said n "test more::second ... ok" || fail "an explicit target's gate ran the cache's tests, not its own"
+said n "Compiling footplate " || fail "an explicit target's gate did not compile footplate"
+! said n "Compiling dep " || fail "an explicit target's gate compiled the dependency of the seed again"
+[ ! -e "$tmp/n/target" ] || fail "the gate made a target/ in its worktree beside CARGO_BUILD_TARGET_DIR"
+[ "$(cat "$cache/target-dir")" = "$tmp/ssd/cargo-target/footplate/n" ] || fail "the cache does not name CARGO_BUILD_TARGET_DIR's target"
+gate_td n n-again CARGO_BUILD_TARGET_DIR "$tmp/ssd/cargo-target/footplate/n"
+! said n-again "Compiling footplate " || fail "an explicit target's own build was compiled again"
+ok "a seeded explicit target builds footplate from its own sources and keeps its build"
+
+# A clean that fails with an explicit target drops that seed, so the build is
+# from nothing.
+refusing_cargo '*'
+make_tree "$tmp/o"
+age "$tmp/o"
+(PATH=$tmp/bin:$PATH && gate_td o o CARGO_TARGET_DIR "$tmp/ssd/cargo-target/footplate/o")
+said o "Compiling dep " || fail "a failed clean with an explicit target kept the seed"
+ok "a clean that fails with an explicit target drops the seed"
+
 # On the build host a shared slot script stands at a fixed place in the home:
 # the gate hands itself to it, and its exit code is the gate's. The stand-in
 # below says what it was given and exits 7 without running the gate.
