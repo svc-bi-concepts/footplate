@@ -18,7 +18,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -146,6 +146,9 @@ struct State {
     last_request: String,
     /// Every request that came, let in or not.
     requests: usize,
+    /// When each request reached the yard, from the first one. Kept so a
+    /// timeout failure can show whether the client or the fake server stalled.
+    request_times: Vec<(String, Instant)>,
     events: Vec<String>,
     streams: Vec<u64>,
     /// How many event lines the streams have written, those of every
@@ -518,6 +521,19 @@ impl Yard {
         self.shared.state.lock().unwrap().requests
     }
 
+    /// How long after the first request each target arrived.
+    pub fn request_times(&self) -> Vec<(String, Duration)> {
+        let state = self.shared.state.lock().unwrap();
+        let Some((_, first)) = state.request_times.first() else {
+            return Vec::new();
+        };
+        state
+            .request_times
+            .iter()
+            .map(|(target, at)| (target.clone(), at.duration_since(*first)))
+            .collect()
+    }
+
     /// The head of the last request, as it came.
     pub fn last_request(&self) -> String {
         self.shared.state.lock().unwrap().last_request.clone()
@@ -766,6 +782,7 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
         let mut state = shared.state.lock().unwrap();
         state.last_request = head.clone();
         state.requests += 1;
+        state.request_times.push((target.clone(), Instant::now()));
     }
 
     // At the listener everything is under /user/, for a device's token:

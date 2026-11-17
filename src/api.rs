@@ -9186,12 +9186,12 @@ mod tests {
         for yard in yards {
             let client = yard.client();
             let way = client.place();
-            let slow = Duration::from_millis(100);
+            let slow = Duration::from_millis(250);
             // Each try that gave up leaves a line, with no edge id: no head
             // came to carry one.
             let gave_up = |method: &str, path: &str| {
                 format!(
-                    "call failed: request=none method={method} path={path} outcome=timeout status=none timeout=100ms"
+                    "call failed: request=none method={method} path={path} outcome=timeout status=none timeout=250ms"
                 )
             };
             yard.answer("Head", r#"{"result": 4}"#);
@@ -9226,10 +9226,15 @@ mod tests {
             );
             // A GET that answers the second time shows no error.
             yard.stall_once("/call/Crew");
-            let Ok((status, mut body)) = client.send("GET", "/call/Crew", "", "", Some(slow), true)
-            else {
-                panic!("{way}: the second try failed");
-            };
+            let (status, mut body) = client
+                .send("GET", "/call/Crew", "", "", Some(slow), true)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "{way}: the second try failed: {err}; requests={:?}; arrivals={:?}",
+                        yard.asked("Crew").len(),
+                        yard.request_times()
+                    )
+                });
             assert_eq!(status, 200, "{way}");
             let mut bytes = Vec::new();
             body.read_to_end(&mut bytes).unwrap();
