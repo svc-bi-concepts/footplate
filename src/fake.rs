@@ -122,6 +122,8 @@ struct Reply {
 
 #[derive(Default)]
 struct State {
+    #[cfg(test)]
+    ready: Option<std::sync::mpsc::Sender<()>>,
     answers: HashMap<String, Reply>,
     /// Replies to the calls of a method with one argument a given string,
     /// by (method, argument, its value), before the standing one.
@@ -300,6 +302,15 @@ impl Yard {
             return Client::new(&self.socket);
         }
         self.client_with(TOKEN)
+    }
+
+    #[cfg(test)]
+    pub fn synchronized_client(&self) -> Client {
+        let (send, receive) = std::sync::mpsc::channel();
+        self.shared.state.lock().unwrap().ready = Some(send);
+        let mut client = self.client();
+        client.ready = Some(Arc::new(Mutex::new(receive)));
+        client
     }
 
     /// A client at the yard's address with a token of the test's.
@@ -643,6 +654,8 @@ impl Drop for Yard {
 fn serve(conn: Wire, shared: &Shared, listener: bool) {
     // A client that hangs up mid-reply is no failure of the test.
     let _ = serve_one(conn, shared, listener);
+    #[cfg(test)]
+    ready(shared);
 }
 
 /// An answer that is no call's: its status, and a body.
@@ -742,9 +755,18 @@ fn stalled(shared: &Shared, target: &str) -> bool {
     false
 }
 
+#[cfg(test)]
+fn ready(shared: &Shared) {
+    if let Some(ready) = &shared.state.lock().unwrap().ready {
+        let _ = ready.send(());
+    }
+}
+
 /// Holds a stalled request's connection open until the yard stops, as a
 /// yard that never answers holds it.
 fn hold_until_stopped(shared: &Shared) {
+    #[cfg(test)]
+    ready(shared);
     let mut state = shared.state.lock().unwrap();
     while !state.stopped {
         state = shared.changed.wait_timeout(state, LOOK).unwrap().0;

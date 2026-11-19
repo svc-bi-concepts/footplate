@@ -2969,6 +2969,8 @@ enum Way {
 #[derive(Clone)]
 pub struct Client {
     way: Way,
+    #[cfg(test)]
+    pub(crate) ready: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
 }
 
 /// Without the token: a client is printed where a test fails.
@@ -2983,6 +2985,8 @@ impl Client {
     #[cfg(unix)]
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Client {
+            #[cfg(test)]
+            ready: None,
             way: Way::Socket(socket.into()),
         }
     }
@@ -2990,6 +2994,8 @@ impl Client {
     /// A yard at an address, as the device `token` is of.
     pub fn remote(address: Address, token: impl Into<String>) -> Self {
         Client {
+            #[cfg(test)]
+            ready: None,
             way: Way::Listener {
                 address,
                 token: token.into(),
@@ -3012,6 +3018,8 @@ impl Client {
         edge_yard: impl Into<String>,
     ) -> Self {
         Client {
+            #[cfg(test)]
+            ready: None,
             way: Way::Listener {
                 address,
                 token: token.into(),
@@ -3221,6 +3229,14 @@ impl Client {
         conn.write_all(format!("{head}X-Yardr-Client: {CLIENT}\r\n{headers}\r\n{body}").as_bytes())
             .and_then(|()| conn.flush())
             .map_err(|err| sent.failed(err.into()))?;
+        #[cfg(test)]
+        if let Some(ready) = &self.ready {
+            ready
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|err| Error::Protocol(format!("fake yard dispatch: {err}")))?;
+        }
         let (status, refuser, body) = respond_call(conn).map_err(|err| sent.failed(err))?;
         let sent = Sent {
             request: body.request.as_deref(),
@@ -9184,14 +9200,23 @@ mod tests {
         #[cfg(not(unix))]
         let yards = vec![Yard::start()];
         for yard in yards {
-            let client = yard.client();
+            let client = yard.synchronized_client();
             let way = client.place();
-            let slow = Duration::from_millis(250);
+            let snapshot = || {
+                format!(
+                    "requests={}; calls={:?}; arrivals={:?}",
+                    yard.requests(),
+                    ["Head", "Crew", "Mail", "Flows"]
+                        .map(|method| (method, yard.asked(method).len())),
+                    yard.request_times()
+                )
+            };
+            let slow = Duration::from_millis(100);
             // Each try that gave up leaves a line, with no edge id: no head
             // came to carry one.
             let gave_up = |method: &str, path: &str| {
                 format!(
-                    "call failed: request=none method={method} path={path} outcome=timeout status=none timeout=250ms"
+                    "call failed: request=none method={method} path={path} outcome=timeout status=none timeout=100ms"
                 )
             };
             yard.answer("Head", r#"{"result": 4}"#);
@@ -9200,7 +9225,7 @@ mod tests {
             // plainly.
             yard.stall("/call/Head");
             let Err(err) = client.send("GET", "/call/Head", "", "", Some(slow), true) else {
-                panic!("{way}: a stalled yard answered");
+                panic!("{way}: a stalled yard answered; {}", snapshot());
             };
             assert!(
                 matches!(
@@ -9210,42 +9235,51 @@ mod tests {
                         sent: true
                     }
                 ),
-                "{way}: {err:?}"
+                "{way}: {err:?}; {}",
+                snapshot()
             );
             assert_eq!(
                 err.to_string(),
                 "the yard is slow to answer; trying again",
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
-            assert!(!err.to_string().contains("os error"), "{way}: {err}");
-            assert_eq!(yard.asked("Head").len(), 2, "{way}");
+            assert!(
+                !err.to_string().contains("os error"),
+                "{way}: {err}; {}",
+                snapshot()
+            );
+            assert_eq!(yard.asked("Head").len(), 2, "{way}: {}", snapshot());
             assert_eq!(
                 take_said(),
                 [gave_up("GET", "/call/Head"), gave_up("GET", "/call/Head")],
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
             // A GET that answers the second time shows no error.
             yard.stall_once("/call/Crew");
             let (status, mut body) = client
                 .send("GET", "/call/Crew", "", "", Some(slow), true)
                 .unwrap_or_else(|err| {
-                    panic!(
-                        "{way}: the second try failed: {err}; requests={:?}; arrivals={:?}",
-                        yard.asked("Crew").len(),
-                        yard.request_times()
-                    )
+                    panic!("{way}: the second try failed: {err}; {}", snapshot())
                 });
-            assert_eq!(status, 200, "{way}");
+            assert_eq!(status, 200, "{way}: {}", snapshot());
             let mut bytes = Vec::new();
-            body.read_to_end(&mut bytes).unwrap();
-            assert_eq!(bytes, br#"{"result": []}"#, "{way}");
-            assert_eq!(yard.asked("Crew").len(), 2, "{way}");
+            body.read_to_end(&mut bytes)
+                .unwrap_or_else(|err| panic!("{way}: body read failed: {err}; {}", snapshot()));
+            assert_eq!(bytes, br#"{"result": []}"#, "{way}: {}", snapshot());
+            assert_eq!(yard.asked("Crew").len(), 2, "{way}: {}", snapshot());
             // The try that gave up said so, though the call went on to answer.
-            assert_eq!(take_said(), [gave_up("GET", "/call/Crew")], "{way}");
+            assert_eq!(
+                take_said(),
+                [gave_up("GET", "/call/Crew")],
+                "{way}: {}",
+                snapshot()
+            );
             // Anything else is asked once, and says it may have run.
             yard.stall("/call/Mail");
             let Err(err) = client.call_once("Mail", &json!({}), slow) else {
-                panic!("{way}: a stalled yard answered");
+                panic!("{way}: a stalled yard answered; {}", snapshot());
             };
             assert!(
                 matches!(
@@ -9255,22 +9289,33 @@ mod tests {
                         sent: true
                     }
                 ),
-                "{way}: {err:?}"
+                "{way}: {err:?}; {}",
+                snapshot()
             );
             assert_eq!(
                 err.to_string(),
                 "the yard did not answer in time, and the action may or may not have happened",
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
-            assert!(!err.to_string().contains("os error"), "{way}: {err}");
-            assert_eq!(yard.asked("Mail").len(), 1, "{way}");
-            assert_eq!(take_said(), [gave_up("POST", "/call/Mail")], "{way}");
+            assert!(
+                !err.to_string().contains("os error"),
+                "{way}: {err}; {}",
+                snapshot()
+            );
+            assert_eq!(yard.asked("Mail").len(), 1, "{way}: {}", snapshot());
+            assert_eq!(
+                take_said(),
+                [gave_up("POST", "/call/Mail")],
+                "{way}: {}",
+                snapshot()
+            );
             // A read is a POST too, and changed nothing: it is said to be
             // slow, as a GET is, not to have maybe run. Only a GET is asked
             // again, so it is asked once.
             yard.stall("/call/Flows");
             let Err(err) = client.call_once("Flows", &json!({}), slow) else {
-                panic!("{way}: a stalled yard answered");
+                panic!("{way}: a stalled yard answered; {}", snapshot());
             };
             assert!(
                 matches!(
@@ -9280,20 +9325,27 @@ mod tests {
                         sent: true
                     }
                 ),
-                "{way}: {err:?}"
+                "{way}: {err:?}; {}",
+                snapshot()
             );
             assert_eq!(
                 err.to_string(),
                 "the yard is slow to answer; trying again",
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
-            assert_eq!(yard.asked("Flows").len(), 1, "{way}");
-            assert_eq!(take_said(), [gave_up("POST", "/call/Flows")], "{way}");
+            assert_eq!(yard.asked("Flows").len(), 1, "{way}: {}", snapshot());
+            assert_eq!(
+                take_said(),
+                [gave_up("POST", "/call/Flows")],
+                "{way}: {}",
+                snapshot()
+            );
             // A stream whose head never comes is said plainly too.
             yard.stall("/events");
             let before = yard.requests();
             let Err(err) = client.events(20, slow) else {
-                panic!("{way}: a stalled stream opened");
+                panic!("{way}: a stalled stream opened; {}", snapshot());
             };
             assert!(
                 matches!(
@@ -9303,21 +9355,24 @@ mod tests {
                         sent: true
                     }
                 ),
-                "{way}: {err:?}"
+                "{way}: {err:?}; {}",
+                snapshot()
             );
             assert_eq!(
                 err.to_string(),
                 "the yard is slow to answer; trying again",
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
-            assert_eq!(yard.requests(), before + 2, "{way}");
+            assert_eq!(yard.requests(), before + 2, "{way}: {}", snapshot());
             assert_eq!(
                 take_said(),
                 [
                     gave_up("GET", "/events?after=20"),
                     gave_up("GET", "/events?after=20")
                 ],
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
         }
 
