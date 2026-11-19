@@ -44,6 +44,11 @@ elif [ "$links" -gt 0 ] && [ ! -d "$(dirname "$warm")" ]; then
     echo "warm cache: $(dirname "$warm") is missing, so the gate runs without the cache" >&2
     warm_off=1
 fi
+# A CI job's runner is thrown away with its cache, so copying a target into it
+# costs minutes and keeps nothing.
+if [ "${GITHUB_ACTIONS:-}" = true ]; then
+    warm_off=1
+fi
 warm_lock="$warm.lock"
 # A lock of mkdir, which either happens or does not: hold it while the
 # cache is read or replaced, so no worktree reads a half-written copy.
@@ -119,7 +124,9 @@ while [ "$td" != / ] && [ "$td" != "${td%/}" ]; do
     td=${td%/}
 done
 seeded=
-if [ -z "$warm_off" ] && [ ! -e "$td/.rustc_info.json" ] && [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
+# Only an absent or empty target is seeded: an explicit one may be a directory
+# of other builds, which a seed must not remove.
+if [ -z "$warm_off" ] && [ -z "$(ls -A "$td" 2>/dev/null)" ] && [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
     if warm_lock; then
         if [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
             rm -rf "${td:?}"
@@ -138,12 +145,14 @@ if [ -z "$warm_off" ] && [ ! -e "$td/.rustc_info.json" ] && [ -f "$warm/target/.
                 esc_from_td=$(printf '%s' "$from_td" | sed 's/[\\&|]/\\&/g')
                 esc_pwd=$(printf '%s' "$PWD" | sed 's/[\\&|]/\\&/g')
                 esc_td=$(printf '%s' "$td" | sed 's/[\\&|]/\\&/g')
+                mark_td=$(printf '\001td\001')
+                mark_from=$(printf '\001from\001')
                 # A rewrite that fails leaves a half-pointed copy, which is
                 # worse than none: drop the seed and build from nothing.
                 grep -rl -F -e "$from_td" -e "$from" "$td/debug/build" --include=output --include=root-output 2>/dev/null | while IFS= read -r f; do
                     tmp=$(mktemp)
                     touch -r "$f" "$tmp"
-                    sed -e "s|$esc_from_td|$esc_td|g" -e "s|$esc_from|$esc_pwd|g" "$f" > "$tmp.out"
+                    sed -e "s|$esc_from_td|$mark_td|g" -e "s|$esc_from|$mark_from|g" -e "s|$mark_td|$esc_td|g" -e "s|$mark_from|$esc_pwd|g" "$f" > "$tmp.out"
                     cat "$tmp.out" > "$f"
                     touch -r "$tmp" "$f"
                     rm -f "$tmp" "$tmp.out"
