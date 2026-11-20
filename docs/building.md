@@ -57,7 +57,9 @@ landing gate would not say so.
 Compiling gpui's tree takes a while, and every fresh worktree would pay it
 again. The gate keeps the built dependencies of a worktree that passed it,
 in `~/.cache/footplate-warm-target`, and a fresh worktree starts from that
-copy, compiling only footplate itself. Deleting that directory loses
+copy, compiling only footplate itself. The same holds where `CARGO_TARGET_DIR`
+(or `CARGO_BUILD_TARGET_DIR`) names the build's target: an absent or empty
+one is seeded, and one that already holds a build is left as it is. Deleting that directory loses
 nothing but time: the next gate run builds from nothing and leaves a fresh
 copy behind it.
 

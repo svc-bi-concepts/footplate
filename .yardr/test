@@ -44,6 +44,11 @@ elif [ "$links" -gt 0 ] && [ ! -d "$(dirname "$warm")" ]; then
     echo "warm cache: $(dirname "$warm") is missing, so the gate runs without the cache" >&2
     warm_off=1
 fi
+# A CI job's runner is thrown away with its cache, so copying a target into it
+# costs minutes and keeps nothing.
+if [ "${GITHUB_ACTIONS:-}" = true ]; then
+    warm_off=1
+fi
 warm_lock="$warm.lock"
 # A lock of mkdir, which either happens or does not: hold it while the
 # cache is read or replaced, so no worktree reads a half-written copy.
@@ -78,14 +83,17 @@ warm_unlock() {
 warm_copy() {
     cp -cR "$1" "$2" 2>/dev/null || cp -pR "$1" "$2"
 }
-# Cleans footplate out of the build directory $1 of the target: target/debug
-# or target/release, or either under a directory named for a triple. Cargo
-# finds a directory by the flags that built it, so they are made from the path.
+# Cleans footplate out of the build directory $1 of the target, named from the
+# target: debug or release, or either under a directory named for a triple.
+# Cargo finds a directory by the flags that built it, so they are made from
+# the name. The clean itself finds the target by the environment, as the build
+# does.
 clean_footplate() {
     profile=${1##*/}
-    triple=${1%/*}
-    triple=${triple#target}
-    triple=${triple#/}
+    triple=
+    case $1 in
+        */*) triple=${1%/*} ;;
+    esac
     set -- clean --locked -p footplate
     if [ "$profile" = release ]; then
         set -- "$@" --release
@@ -95,34 +103,65 @@ clean_footplate() {
     fi
     cargo "$@"
 }
+# The directory cargo builds into: the one the environment names (cargo takes
+# CARGO_TARGET_DIR before CARGO_BUILD_TARGET_DIR), or else the worktree's own
+# target. An explicit one, as the yard gives a bead's builds on the SSD, is
+# seeded and refreshed as the worktree's is, so such a bead starts from the
+# cache too, and the worktree gets no target/ of its own.
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    td=$CARGO_TARGET_DIR
+elif [ -n "${CARGO_BUILD_TARGET_DIR:-}" ]; then
+    td=$CARGO_BUILD_TARGET_DIR
+else
+    td=$PWD/target
+fi
+# A relative one is relative to the directory cargo runs in, the worktree.
+case $td in
+    /*) ;;
+    *) td=$PWD/$td ;;
+esac
+while [ "$td" != / ] && [ "$td" != "${td%/}" ]; do
+    td=${td%/}
+done
 seeded=
-if [ -z "$warm_off$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ] && [ ! -e target/.rustc_info.json ] && [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
+# Only an absent or empty target is seeded: an explicit one may be a directory
+# of other builds, which a seed must not remove.
+if [ -z "$warm_off" ] && [ -z "$(ls -A "$td" 2>/dev/null)" ] && [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
     if warm_lock; then
         if [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
-            rm -rf target
-            if warm_copy "$warm/target" target; then
-                # The copy names the worktree it was built in, in the few
-                # files that hold absolute paths to it; point those at this
-                # one, and put their times back, so the build reads its own
-                # copy and cargo still takes it as fresh.
+            rm -rf "${td:?}"
+            mkdir -p "$(dirname "$td")" 2>/dev/null || true
+            if warm_copy "$warm/target" "$td"; then
+                # The copy names the directories it was built in, in the few
+                # files that hold absolute paths to them: the worktree it came
+                # from and its target directory (the worktree's own target for
+                # a cache made before the target was recorded). Point those at
+                # this one's, and put their times back, so the build reads its
+                # own copy and cargo still takes it as fresh.
                 from=$(cat "$warm/from")
+                from_td=$(cat "$warm/target-dir" 2>/dev/null) || true
+                [ -n "$from_td" ] || from_td=$from/target
                 esc_from=$(printf '%s' "$from" | sed 's/[\\&|]/\\&/g')
+                esc_from_td=$(printf '%s' "$from_td" | sed 's/[\\&|]/\\&/g')
                 esc_pwd=$(printf '%s' "$PWD" | sed 's/[\\&|]/\\&/g')
+                esc_td=$(printf '%s' "$td" | sed 's/[\\&|]/\\&/g')
+                mark_td=$(printf '\001td\001')
+                mark_from=$(printf '\001from\001')
                 # A rewrite that fails leaves a half-pointed copy, which is
                 # worse than none: drop the seed and build from nothing.
-                grep -rl -F "$from" target/debug/build --include=output 2>/dev/null | while IFS= read -r f; do
+                grep -rl -F -e "$from_td" -e "$from" "$td/debug/build" --include=output --include=root-output 2>/dev/null | while IFS= read -r f; do
                     tmp=$(mktemp)
                     touch -r "$f" "$tmp"
-                    sed "s|$esc_from|$esc_pwd|g" "$f" > "$tmp.out"
+                    sed -e "s|$esc_from_td|$mark_td|g" -e "s|$esc_from|$mark_from|g" -e "s|$mark_td|$esc_td|g" -e "s|$mark_from|$esc_pwd|g" "$f" > "$tmp.out"
                     cat "$tmp.out" > "$f"
                     touch -r "$tmp" "$f"
                     rm -f "$tmp" "$tmp.out"
-                done || rm -rf target
-                if [ -e target ]; then
+                done || rm -rf "${td:?}"
+                if [ -e "$td" ]; then
                     seeded=1
                 fi
             else
-                rm -rf target
+                rm -rf "${td:?}"
             fi
         fi
         warm_unlock
@@ -142,20 +181,20 @@ fi
 # at once on that tree's, so each directory the copy has is cleaned. Cargo is
 # asked to clean each, and no find deletes their fingerprints: a layout cargo
 # does not know is an error that shows, where a pattern that stopped matching
-# would keep the stale builds quietly. This target is the worktree's own, so
-# no lock is held. Only a seed is cleaned: a target built here is fresh by its
+# would keep the stale builds quietly. This target is the gate's own (the
+# worktree's, or the one the environment names), so no lock is held. Only a seed is cleaned: a target built here is fresh by its
 # own sources, and cleaning it would compile footplate at every run. --locked
 # as in the steps below: cargo clean would otherwise write a stale Cargo.lock
 # out and hide it from them. A clean that fails drops the seed, as a failed
 # rewrite does, and the directories after it are not asked.
 # scripts/test-gate.sh holds the gate to all of this.
 if [ -n "$seeded" ]; then
-    for dir in target/debug target/release target/*/debug target/*/release; do
+    for dir in "$td/debug" "$td/release" "$td"/*/debug "$td"/*/release; do
         # A profile never built, and the glob's own pattern where nothing
         # matched it, have no fingerprints: cargo is not asked.
         [ -d "$dir/.fingerprint" ] || continue
-        clean_footplate "$dir" || {
-            rm -rf target
+        clean_footplate "${dir#"$td"/}" || {
+            rm -rf "${td:?}"
             break
         }
     done
@@ -169,13 +208,14 @@ cargo build --locked
 # worktree. The cache is built aside and moved into place under the lock,
 # so a reader never sees a half-written copy, and a failure here must not
 # fail the gate.
-if [ -z "$warm_off$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ]; then
+if [ -z "$warm_off" ]; then
     if warm_lock; then
         rm -rf "$warm.tmp" || true
-        if mkdir "$warm.tmp" 2>/dev/null && warm_copy target "$warm.tmp/target" 2>/dev/null; then
+        if mkdir "$warm.tmp" 2>/dev/null && warm_copy "$td" "$warm.tmp/target" 2>/dev/null; then
             rm -rf "$warm.tmp/target/debug/incremental" || true
             printf '%s' "$PWD" > "$warm.tmp/from" || true
-            if [ -f "$warm.tmp/from" ]; then
+            printf '%s' "$td" > "$warm.tmp/target-dir" || true
+            if [ -f "$warm.tmp/from" ] && [ -f "$warm.tmp/target-dir" ]; then
                 rm -rf "$warm.old" || true
                 if [ -e "$warm" ]; then
                     mv "$warm" "$warm.old" || true

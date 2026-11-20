@@ -12,7 +12,7 @@ set -eu
 
 root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
 gate=$root/.yardr/test
-tmp=$(mktemp -d)
+tmp=$(cd "$(mktemp -d)" && pwd -P)
 cleanup() {
     rm -rf "$tmp"
 }
@@ -26,7 +26,7 @@ fail() {
 
 # The gate puts $HOME/.cargo/bin first on PATH, and the home below has none:
 # the toolchain is found where it is now, with cargo's and rustup's homes
-# kept. A target dir of the person's own would switch the seeding off.
+# kept.
 PATH="$HOME/.cargo/bin:$PATH"
 command -v cargo >/dev/null 2>&1 || {
     echo "test-gate.sh: requires cargo" >&2
@@ -36,7 +36,9 @@ CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
 RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
 CARGO_TERM_COLOR=never
 export PATH CARGO_HOME RUSTUP_HOME CARGO_TERM_COLOR
-unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
+# A target dir of the person's own would put the targets outside the worktrees
+# in $tmp, where the tests look for them.
+unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR GITHUB_ACTIONS
 real_cargo=$(command -v cargo)
 mkdir "$tmp/home"
 HOME=$tmp/home
@@ -61,7 +63,16 @@ name = "dep"
 version = "0.1.0"
 edition = "2021"
 EOF
+    cat > "$1/dep/build.rs" <<'EOF'
+fn main() {
+    let out = std::env::var("OUT_DIR").unwrap();
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rustc-env=DEP_OUT={out}");
+}
+EOF
     cat > "$1/dep/src/lib.rs" <<'EOF'
+pub const OUT: &str = env!("DEP_OUT");
+
 pub fn answer() -> u32 {
     42
 }
@@ -310,6 +321,96 @@ said k "warm cache: $tmp/vol/cache is missing, so the gate leaves the cache as i
 [ "$(readlink "$cache")" = "$tmp/vol/cache/footplate-warm-target" ] || fail "the gate changed the link to a volume that went"
 [ -z "$(find "$HOME/.cache" -name 'footplate-warm-target*' -type d)" ] || fail "the gate left a directory of the cache in the home"
 ok "a volume that goes during the gate is not made again"
+
+# An explicit target dir, as the yard gives a bead's builds on the SSD: the gate
+# seeds it from the cache and refreshes the cache from it, the cache names the
+# directory it was built in, and the worktree gets no target/ of its own. The
+# cache is the link to $tmp/ssd again, and the targets are beside it there.
+rm "$cache"
+ln -s "$tmp/ssd/cache/footplate-warm-target" "$cache"
+# Runs the gate in the worktree $1 with the environment variable $3 set to the
+# directory $4, and keeps what it said in $tmp/$2.log.
+gate_td() {
+    (cd "$tmp/$1" && env "$3=$4" sh "$gate") > "$tmp/$2.log" 2>&1 || {
+        tail -n 40 "$tmp/$2.log" >&2
+        fail "the gate failed in $1 with $3 set"
+    }
+}
+make_tree "$tmp/m"
+age "$tmp/m"
+gate_td m m CARGO_TARGET_DIR "$tmp/ssd/cargo-target/footplate/m"
+! said m "Compiling dep " || fail "a worktree with an explicit target was not seeded"
+[ -f "$tmp/ssd/cargo-target/footplate/m/.rustc_info.json" ] || fail "the explicit target was not built on the volume"
+[ -f "$cache/target/.rustc_info.json" ] || fail "the gate with an explicit target left no cache"
+[ "$(cat "$cache/target-dir")" = "$tmp/ssd/cargo-target/footplate/m" ] || fail "the cache does not name the explicit target it was built in: $(cat "$cache/target-dir")"
+[ "$(cat "$cache/from")" = "$tmp/m" ] || fail "the cache does not name the worktree it was built in"
+[ ! -e "$tmp/m/target" ] || fail "the gate made a target/ in its worktree beside an explicit one"
+ok "a gate with an explicit target dir is seeded, and leaves the cache and its target on the volume"
+
+# A worktree and a target whose names hold the cache's as a prefix: the build
+# script's recorded out dir must name this target once, not the cache's and not
+# a name made of both.
+make_tree "$tmp/m2"
+age "$tmp/m2"
+gate_td m2 m2 CARGO_TARGET_DIR "$tmp/ssd/cargo-target/footplate/m2"
+! said m2 "Compiling dep " || fail "a worktree whose name holds the cache's was not seeded"
+td2=$tmp/ssd/cargo-target/footplate/m2
+found=0
+for f in "$td2"/debug/build/dep-*/root-output; do
+    [ -f "$f" ] || continue
+    found=1
+    case $(cat "$f") in
+        "$td2"/debug/build/dep-*/out) ;;
+        *) fail "the seed's build script out dir names '$(cat "$f")', not the new target" ;;
+    esac
+done
+[ "$found" = 1 ] || fail "the seeded target has no build script out dir"
+ok "a seeded target's build script paths name the new target once"
+
+# A seeded explicit target builds footplate from its own sources, and its own
+# build stays as it is for the next run. CARGO_BUILD_TARGET_DIR, the other
+# variable cargo reads, is seeded the same way.
+make_tree "$tmp/n"
+add_test "$tmp/n"
+age "$tmp/n"
+gate_td n n CARGO_BUILD_TARGET_DIR "$tmp/ssd/cargo-target/footplate/n"
+said n "test more::second ... ok" || fail "an explicit target's gate ran the cache's tests, not its own"
+said n "Compiling footplate " || fail "an explicit target's gate did not compile footplate"
+! said n "Compiling dep " || fail "an explicit target's gate compiled the dependency of the seed again"
+[ ! -e "$tmp/n/target" ] || fail "the gate made a target/ in its worktree beside CARGO_BUILD_TARGET_DIR"
+[ "$(cat "$cache/target-dir")" = "$tmp/ssd/cargo-target/footplate/n" ] || fail "the cache does not name CARGO_BUILD_TARGET_DIR's target"
+gate_td n n-again CARGO_BUILD_TARGET_DIR "$tmp/ssd/cargo-target/footplate/n"
+! said n-again "Compiling footplate " || fail "an explicit target's own build was compiled again"
+ok "a seeded explicit target builds footplate from its own sources and keeps its build"
+
+# A target that holds something already is not seeded, and nothing in it goes.
+make_tree "$tmp/q"
+age "$tmp/q"
+mkdir -p "$tmp/ssd/cargo-target/footplate/q"
+echo mine > "$tmp/ssd/cargo-target/footplate/q/keep"
+gate_td q q CARGO_TARGET_DIR "$tmp/ssd/cargo-target/footplate/q"
+[ "$(cat "$tmp/ssd/cargo-target/footplate/q/keep")" = mine ] || fail "the gate removed what an explicit target held"
+said q "Compiling dep " || fail "a target that held something was seeded"
+ok "a target that holds something is built in as it is"
+
+# On GitHub Actions the runner is thrown away: the gate neither seeds from the
+# cache nor writes it.
+before=$(cat "$cache/from" "$cache/target-dir")
+make_tree "$tmp/r"
+age "$tmp/r"
+(GITHUB_ACTIONS=true && export GITHUB_ACTIONS && gate_td r r CARGO_TARGET_DIR "$tmp/ssd/cargo-target/footplate/r")
+said r "Compiling dep " || fail "a gate on GitHub Actions was seeded"
+[ "$(cat "$cache/from" "$cache/target-dir")" = "$before" ] || fail "a gate on GitHub Actions wrote the cache"
+ok "a gate on GitHub Actions leaves the cache alone"
+
+# A clean that fails with an explicit target drops that seed, so the build is
+# from nothing.
+refusing_cargo '*'
+make_tree "$tmp/o"
+age "$tmp/o"
+(PATH=$tmp/bin:$PATH && gate_td o o CARGO_TARGET_DIR "$tmp/ssd/cargo-target/footplate/o")
+said o "Compiling dep " || fail "a failed clean with an explicit target kept the seed"
+ok "a clean that fails with an explicit target drops the seed"
 
 # On the build host a shared slot script stands at a fixed place in the home:
 # the gate hands itself to it, and its exit code is the gate's. The stand-in
