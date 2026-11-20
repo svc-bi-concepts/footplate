@@ -2969,6 +2969,10 @@ enum Way {
 #[derive(Clone)]
 pub struct Client {
     way: Way,
+    /// Test servers release the response read after writing their reply or
+    /// committing to a stall, so worker scheduling cannot consume its timeout.
+    #[cfg(test)]
+    pub(crate) ready: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
 }
 
 /// Without the token: a client is printed where a test fails.
@@ -2983,6 +2987,8 @@ impl Client {
     #[cfg(unix)]
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Client {
+            #[cfg(test)]
+            ready: None,
             way: Way::Socket(socket.into()),
         }
     }
@@ -2990,6 +2996,8 @@ impl Client {
     /// A yard at an address, as the device `token` is of.
     pub fn remote(address: Address, token: impl Into<String>) -> Self {
         Client {
+            #[cfg(test)]
+            ready: None,
             way: Way::Listener {
                 address,
                 token: token.into(),
@@ -3012,6 +3020,8 @@ impl Client {
         edge_yard: impl Into<String>,
     ) -> Self {
         Client {
+            #[cfg(test)]
+            ready: None,
             way: Way::Listener {
                 address,
                 token: token.into(),
@@ -3221,6 +3231,14 @@ impl Client {
         conn.write_all(format!("{head}X-Yardr-Client: {CLIENT}\r\n{headers}\r\n{body}").as_bytes())
             .and_then(|()| conn.flush())
             .map_err(|err| sent.failed(err.into()))?;
+        #[cfg(test)]
+        if let Some(ready) = &self.ready {
+            ready
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|err| Error::Protocol(format!("fake yard dispatch: {err}")))?;
+        }
         let (status, refuser, body) = respond_call(conn).map_err(|err| sent.failed(err))?;
         let sent = Sent {
             request: body.request.as_deref(),
@@ -8611,22 +8629,61 @@ mod tests {
         assert_eq!(take_said(), [said(500)]);
     }
 
+    #[derive(Clone)]
+    struct ReplyStages {
+        ready: std::sync::mpsc::Sender<()>,
+        arrivals: Arc<std::sync::Mutex<Vec<Duration>>>,
+        started: Instant,
+    }
+
+    impl ReplyStages {
+        fn new(client: &mut Client) -> Self {
+            let (send, receive) = std::sync::mpsc::channel();
+            client.ready = Some(Arc::new(std::sync::Mutex::new(receive)));
+            Self {
+                ready: send,
+                arrivals: Arc::new(std::sync::Mutex::new(Vec::new())),
+                started: Instant::now(),
+            }
+        }
+
+        fn arrived(&self) {
+            self.arrivals.lock().unwrap().push(self.started.elapsed());
+        }
+
+        fn written(&self) {
+            let _ = self.ready.send(());
+        }
+
+        fn snapshot(&self) -> String {
+            let arrivals = self.arrivals.lock().unwrap();
+            format!("requests={}; arrivals={arrivals:?}", arrivals.len())
+        }
+    }
+
     /// As [`answering`], but each connection is held open after `reply`, as
     /// one whose rest is slow to come.
-    fn holding(reply: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+    fn holding(reply: Vec<u8>) -> (Client, thread::JoinHandle<()>, ReplyStages) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
+        let mut client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
+        let stages = ReplyStages::new(&mut client);
+        let held = stages.clone();
         let finished = thread::spawn(move || {
             let (mut conn, _) = listener.accept().unwrap();
+            conn.set_nodelay(true).unwrap();
+            held.arrived();
             let mut asked = [0u8; 1024];
             let _ = conn.read(&mut asked);
+            thread::sleep(Duration::from_millis(150));
             let _ = conn.write_all(&reply);
+            held.written();
             // The client closes after its timeout; waiting for that is both
             // the fixture's release and the end of this one-request server.
             let mut rest = [0u8; 1];
             while conn.read(&mut rest).unwrap_or(0) != 0 {}
         });
-        (address, finished)
+        (client, finished, stages)
     }
 
     /// A call that fails leaves one line, with the edge's id where the head
@@ -8771,28 +8828,36 @@ mod tests {
         // are given so long a one that a busy machine never decides them.
         let (brief, ample) = (Duration::from_millis(100), Duration::from_secs(5));
         for (name, reply, held, id, outcome, status) in cases {
-            let (address, wait, finished) = match held {
+            let (client, wait, finished, stages) = match held {
                 true => {
-                    let (address, finished) = holding(reply);
-                    (address, brief, Some(finished))
+                    let (client, finished, stages) = holding(reply);
+                    (client, brief, Some(finished), Some(stages))
                 }
-                false => (answering(reply), ample, None),
+                false => (
+                    Client::remote(Address::parse(&answering(reply)).unwrap(), TOKEN),
+                    ample,
+                    None,
+                    None,
+                ),
             };
-            let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
+            let snapshot = || stages.as_ref().map(ReplyStages::snapshot);
             let Err(err) = client.call_once("Head", &json!({}), wait) else {
-                panic!("{name}: the call answered");
+                panic!("{name}: the call answered; {:?}", snapshot());
             };
             if let Some(finished) = finished {
-                finished.join().unwrap();
+                finished.join().unwrap_or_else(|err| {
+                    panic!("{name}: server failed: {err:?}; {:?}", snapshot())
+                });
             }
-            assert_eq!(err.outcome(), outcome, "{name}: {err:?}");
+            assert_eq!(err.outcome(), outcome, "{name}: {err:?}; {:?}", snapshot());
             let said = take_said();
             assert_eq!(
                 said,
                 [format!(
                     "call failed: request={id} method=POST path=/call/Head outcome={outcome} status={status} timeout={wait:?}"
                 )],
-                "{name}"
+                "{name}: {:?}",
+                snapshot()
             );
             said_all.extend(said);
         }
@@ -9184,8 +9249,17 @@ mod tests {
         #[cfg(not(unix))]
         let yards = vec![Yard::start()];
         for yard in yards {
-            let client = yard.client();
+            let client = yard.synchronized_client();
             let way = client.place();
+            let snapshot = || {
+                format!(
+                    "requests={}; calls={:?}; arrivals={:?}",
+                    yard.requests(),
+                    ["Head", "Crew", "Mail", "Flows"]
+                        .map(|method| (method, yard.asked(method).len())),
+                    yard.request_times()
+                )
+            };
             let slow = Duration::from_millis(100);
             // Each try that gave up leaves a line, with no edge id: no head
             // came to carry one.
@@ -9200,7 +9274,7 @@ mod tests {
             // plainly.
             yard.stall("/call/Head");
             let Err(err) = client.send("GET", "/call/Head", "", "", Some(slow), true) else {
-                panic!("{way}: a stalled yard answered");
+                panic!("{way}: a stalled yard answered; {}", snapshot());
             };
             assert!(
                 matches!(
@@ -9210,37 +9284,51 @@ mod tests {
                         sent: true
                     }
                 ),
-                "{way}: {err:?}"
+                "{way}: {err:?}; {}",
+                snapshot()
             );
             assert_eq!(
                 err.to_string(),
                 "the yard is slow to answer; trying again",
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
-            assert!(!err.to_string().contains("os error"), "{way}: {err}");
-            assert_eq!(yard.asked("Head").len(), 2, "{way}");
+            assert!(
+                !err.to_string().contains("os error"),
+                "{way}: {err}; {}",
+                snapshot()
+            );
+            assert_eq!(yard.asked("Head").len(), 2, "{way}: {}", snapshot());
             assert_eq!(
                 take_said(),
                 [gave_up("GET", "/call/Head"), gave_up("GET", "/call/Head")],
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
             // A GET that answers the second time shows no error.
             yard.stall_once("/call/Crew");
-            let Ok((status, mut body)) = client.send("GET", "/call/Crew", "", "", Some(slow), true)
-            else {
-                panic!("{way}: the second try failed");
-            };
-            assert_eq!(status, 200, "{way}");
+            let (status, mut body) = client
+                .send("GET", "/call/Crew", "", "", Some(slow), true)
+                .unwrap_or_else(|err| {
+                    panic!("{way}: the second try failed: {err}; {}", snapshot())
+                });
+            assert_eq!(status, 200, "{way}: {}", snapshot());
             let mut bytes = Vec::new();
-            body.read_to_end(&mut bytes).unwrap();
-            assert_eq!(bytes, br#"{"result": []}"#, "{way}");
-            assert_eq!(yard.asked("Crew").len(), 2, "{way}");
+            body.read_to_end(&mut bytes)
+                .unwrap_or_else(|err| panic!("{way}: body read failed: {err}; {}", snapshot()));
+            assert_eq!(bytes, br#"{"result": []}"#, "{way}: {}", snapshot());
+            assert_eq!(yard.asked("Crew").len(), 2, "{way}: {}", snapshot());
             // The try that gave up said so, though the call went on to answer.
-            assert_eq!(take_said(), [gave_up("GET", "/call/Crew")], "{way}");
+            assert_eq!(
+                take_said(),
+                [gave_up("GET", "/call/Crew")],
+                "{way}: {}",
+                snapshot()
+            );
             // Anything else is asked once, and says it may have run.
             yard.stall("/call/Mail");
             let Err(err) = client.call_once("Mail", &json!({}), slow) else {
-                panic!("{way}: a stalled yard answered");
+                panic!("{way}: a stalled yard answered; {}", snapshot());
             };
             assert!(
                 matches!(
@@ -9250,22 +9338,33 @@ mod tests {
                         sent: true
                     }
                 ),
-                "{way}: {err:?}"
+                "{way}: {err:?}; {}",
+                snapshot()
             );
             assert_eq!(
                 err.to_string(),
                 "the yard did not answer in time, and the action may or may not have happened",
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
-            assert!(!err.to_string().contains("os error"), "{way}: {err}");
-            assert_eq!(yard.asked("Mail").len(), 1, "{way}");
-            assert_eq!(take_said(), [gave_up("POST", "/call/Mail")], "{way}");
+            assert!(
+                !err.to_string().contains("os error"),
+                "{way}: {err}; {}",
+                snapshot()
+            );
+            assert_eq!(yard.asked("Mail").len(), 1, "{way}: {}", snapshot());
+            assert_eq!(
+                take_said(),
+                [gave_up("POST", "/call/Mail")],
+                "{way}: {}",
+                snapshot()
+            );
             // A read is a POST too, and changed nothing: it is said to be
             // slow, as a GET is, not to have maybe run. Only a GET is asked
             // again, so it is asked once.
             yard.stall("/call/Flows");
             let Err(err) = client.call_once("Flows", &json!({}), slow) else {
-                panic!("{way}: a stalled yard answered");
+                panic!("{way}: a stalled yard answered; {}", snapshot());
             };
             assert!(
                 matches!(
@@ -9275,20 +9374,27 @@ mod tests {
                         sent: true
                     }
                 ),
-                "{way}: {err:?}"
+                "{way}: {err:?}; {}",
+                snapshot()
             );
             assert_eq!(
                 err.to_string(),
                 "the yard is slow to answer; trying again",
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
-            assert_eq!(yard.asked("Flows").len(), 1, "{way}");
-            assert_eq!(take_said(), [gave_up("POST", "/call/Flows")], "{way}");
+            assert_eq!(yard.asked("Flows").len(), 1, "{way}: {}", snapshot());
+            assert_eq!(
+                take_said(),
+                [gave_up("POST", "/call/Flows")],
+                "{way}: {}",
+                snapshot()
+            );
             // A stream whose head never comes is said plainly too.
             yard.stall("/events");
             let before = yard.requests();
             let Err(err) = client.events(20, slow) else {
-                panic!("{way}: a stalled stream opened");
+                panic!("{way}: a stalled stream opened; {}", snapshot());
             };
             assert!(
                 matches!(
@@ -9298,21 +9404,24 @@ mod tests {
                         sent: true
                     }
                 ),
-                "{way}: {err:?}"
+                "{way}: {err:?}; {}",
+                snapshot()
             );
             assert_eq!(
                 err.to_string(),
                 "the yard is slow to answer; trying again",
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
-            assert_eq!(yard.requests(), before + 2, "{way}");
+            assert_eq!(yard.requests(), before + 2, "{way}: {}", snapshot());
             assert_eq!(
                 take_said(),
                 [
                     gave_up("GET", "/events?after=20"),
                     gave_up("GET", "/events?after=20")
                 ],
-                "{way}"
+                "{way}: {}",
+                snapshot()
             );
         }
 
@@ -9321,6 +9430,9 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
         let reply = br#"{"user":"jo","said_by":"laptop","yard":"south"}"#;
+        let mut client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
+        let stages = ReplyStages::new(&mut client);
+        let replies = stages.clone();
         let server = thread::spawn(move || {
             let read_head = |conn: &std::net::TcpStream| {
                 let mut reader = BufReader::new(conn.try_clone().unwrap());
@@ -9333,7 +9445,10 @@ mod tests {
                 }
             };
             let (mut first, _) = listener.accept().unwrap();
+            first.set_nodelay(true).unwrap();
+            replies.arrived();
             read_head(&first);
+            thread::sleep(Duration::from_millis(150));
             write!(
                 first,
                 "HTTP/1.1 200 OK\r\nX-Edge-Request: r-first\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -9342,9 +9457,13 @@ mod tests {
             .unwrap();
             first.write_all(&reply[..2]).unwrap();
             first.flush().unwrap();
+            replies.written();
 
             let (mut second, _) = listener.accept().unwrap();
+            second.set_nodelay(true).unwrap();
+            replies.arrived();
             read_head(&second);
+            thread::sleep(Duration::from_millis(150));
             write!(
                 second,
                 "HTTP/1.1 200 OK\r\nX-Edge-Request: r-second\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -9352,34 +9471,52 @@ mod tests {
             )
             .unwrap();
             second.write_all(reply).unwrap();
+            second.flush().unwrap();
+            replies.written();
         });
-        let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
         let (status, bytes, request) = client
             .get_body("/me", "", Some(Duration::from_millis(100)), |_| true)
-            .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(bytes, reply);
+            .unwrap_or_else(|err| panic!("body retry failed: {err}; {}", stages.snapshot()));
+        assert_eq!(status, 200, "{}", stages.snapshot());
+        assert_eq!(bytes, reply, "{}", stages.snapshot());
+        let requests = stages.arrivals.lock().unwrap().len();
+        assert_eq!(requests, 2, "{}", stages.snapshot());
         // The answer read whole is the second's, and the try that timed out
         // in its body left its line, with the id its head carried.
-        assert_eq!(request.as_deref(), Some("r-second"));
+        assert_eq!(
+            request.as_deref(),
+            Some("r-second"),
+            "{}",
+            stages.snapshot()
+        );
         assert_eq!(
             take_said(),
             [
                 "call failed: request=r-first method=GET path=/me outcome=timeout status=200 timeout=100ms"
-            ]
+            ],
+            "{}",
+            stages.snapshot()
         );
-        server.join().unwrap();
+        server.join().unwrap_or_else(|err| {
+            panic!("body retry server failed: {err:?}; {}", stages.snapshot())
+        });
 
         // A call whose head came and whose body stops is told by the call
         // too: a read is slow, a write may have run. Neither is asked again.
         let short = b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nshort".to_vec();
         for (method, idempotent) in [("Flows", true), ("Mail", false)] {
-            let (address, finished) = holding(short.clone());
-            let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
+            let (client, finished, stages) = holding(short.clone());
             let Err(err) = client.call_once(method, &json!({}), Duration::from_millis(100)) else {
-                panic!("{method}: a body that stops answered");
+                panic!(
+                    "{method}: a body that stops answered; {}",
+                    stages.snapshot()
+                );
             };
-            finished.join().unwrap();
+            finished.join().unwrap_or_else(|err| {
+                panic!("{method}: server failed: {err:?}; {}", stages.snapshot())
+            });
+            let requests = stages.arrivals.lock().unwrap().len();
+            assert_eq!(requests, 1, "{method}: {}", stages.snapshot());
             assert!(
                 matches!(
                     &err,
@@ -9388,14 +9525,16 @@ mod tests {
                         sent: true
                     } if *said == idempotent
                 ),
-                "{method}: {err:?}"
+                "{method}: {err:?}; {}",
+                stages.snapshot()
             );
             assert_eq!(
                 take_said(),
                 [format!(
                     "call failed: request=none method=POST path=/call/{method} outcome=timeout status=200 timeout=100ms"
                 )],
-                "{method}"
+                "{method}: {}",
+                stages.snapshot()
             );
         }
     }

@@ -18,7 +18,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -122,6 +122,8 @@ struct Reply {
 
 #[derive(Default)]
 struct State {
+    #[cfg(test)]
+    ready: Option<std::sync::mpsc::Sender<()>>,
     answers: HashMap<String, Reply>,
     /// Replies to the calls of a method with one argument a given string,
     /// by (method, argument, its value), before the standing one.
@@ -146,6 +148,9 @@ struct State {
     last_request: String,
     /// Every request that came, let in or not.
     requests: usize,
+    /// When each request reached the yard. Kept so a
+    /// timeout failure can show whether the client or the fake server stalled.
+    request_times: Vec<(String, Instant)>,
     events: Vec<String>,
     streams: Vec<u64>,
     /// How many event lines the streams have written, those of every
@@ -297,6 +302,18 @@ impl Yard {
             return Client::new(&self.socket);
         }
         self.client_with(TOKEN)
+    }
+
+    /// For timeout tests: wait until the yard has answered or committed to
+    /// a stall before reading. Use this client alone, one request at a time:
+    /// the yard's readiness signals are shared, not tied to a connection.
+    #[cfg(test)]
+    pub fn synchronized_client(&self) -> Client {
+        let (send, receive) = std::sync::mpsc::channel();
+        self.shared.state.lock().unwrap().ready = Some(send);
+        let mut client = self.client();
+        client.ready = Some(Arc::new(Mutex::new(receive)));
+        client
     }
 
     /// A client at the yard's address with a token of the test's.
@@ -518,6 +535,19 @@ impl Yard {
         self.shared.state.lock().unwrap().requests
     }
 
+    /// How long after the first request each target arrived.
+    pub fn request_times(&self) -> Vec<(String, Duration)> {
+        let state = self.shared.state.lock().unwrap();
+        let Some((_, first)) = state.request_times.first() else {
+            return Vec::new();
+        };
+        state
+            .request_times
+            .iter()
+            .map(|(target, at)| (target.clone(), at.duration_since(*first)))
+            .collect()
+    }
+
     /// The head of the last request, as it came.
     pub fn last_request(&self) -> String {
         self.shared.state.lock().unwrap().last_request.clone()
@@ -627,6 +657,8 @@ impl Drop for Yard {
 fn serve(conn: Wire, shared: &Shared, listener: bool) {
     // A client that hangs up mid-reply is no failure of the test.
     let _ = serve_one(conn, shared, listener);
+    #[cfg(test)]
+    ready(shared);
 }
 
 /// An answer that is no call's: its status, and a body.
@@ -726,9 +758,18 @@ fn stalled(shared: &Shared, target: &str) -> bool {
     false
 }
 
+#[cfg(test)]
+fn ready(shared: &Shared) {
+    if let Some(ready) = &shared.state.lock().unwrap().ready {
+        let _ = ready.send(());
+    }
+}
+
 /// Holds a stalled request's connection open until the yard stops, as a
 /// yard that never answers holds it.
 fn hold_until_stopped(shared: &Shared) {
+    #[cfg(test)]
+    ready(shared);
     let mut state = shared.state.lock().unwrap();
     while !state.stopped {
         state = shared.changed.wait_timeout(state, LOOK).unwrap().0;
@@ -766,6 +807,7 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
         let mut state = shared.state.lock().unwrap();
         state.last_request = head.clone();
         state.requests += 1;
+        state.request_times.push((target.clone(), Instant::now()));
     }
 
     // At the listener everything is under /user/, for a device's token:
