@@ -148,7 +148,7 @@ struct State {
     last_request: String,
     /// Every request that came, let in or not.
     requests: usize,
-    /// When each request reached the yard, from the first one. Kept so a
+    /// When each request reached the yard. Kept so a
     /// timeout failure can show whether the client or the fake server stalled.
     request_times: Vec<(String, Instant)>,
     events: Vec<String>,
@@ -304,6 +304,9 @@ impl Yard {
         self.client_with(TOKEN)
     }
 
+    /// For timeout tests: wait until the yard has answered or committed to
+    /// a stall before reading. Use this client alone, one request at a time:
+    /// the yard's readiness signals are shared, not tied to a connection.
     #[cfg(test)]
     pub fn synchronized_client(&self) -> Client {
         let (send, receive) = std::sync::mpsc::channel();

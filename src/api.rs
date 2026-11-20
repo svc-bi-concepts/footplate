@@ -2969,6 +2969,8 @@ enum Way {
 #[derive(Clone)]
 pub struct Client {
     way: Way,
+    /// Test servers release the response read after writing their reply or
+    /// committing to a stall, so worker scheduling cannot consume its timeout.
     #[cfg(test)]
     pub(crate) ready: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
 }
